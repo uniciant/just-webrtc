@@ -1,0 +1,12 @@
+[package]
+name = "just-webrtc"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0"
+webrtc = "0.9"
+tokio = { version = "1.36", default-features = false, features = ["sync"] }
+bytes = "1.5"
