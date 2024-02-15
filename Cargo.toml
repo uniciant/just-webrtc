@@ -10,3 +10,30 @@ anyhow = "1.0"
 webrtc = "0.9"
 tokio = { version = "1.36", default-features = false, features = ["sync"] }
 bytes = "1.5"
+serde = "1.0"
+js-sys = "0.3.68"
+wasm-bindgen = "0.2.91"
+serde-wasm-bindgen = "0.6.3"
+wasm-bindgen-futures = "0.4.41"
+log = "0.4.20"
+
+web-sys = { version = "0.3.68", default-features = false, features = [
+  "MessageEvent",
+  "RtcBundlePolicy",
+  "RtcConfiguration",
+  "RtcDataChannel",
+  "RtcDataChannelEvent",
+  "RtcDataChannelInit",
+  "RtcDataChannelType",
+  "RtcIceCandidate",
+  "RtcIceCandidateInit",
+  "RtcIceConnectionState",
+  "RtcIceGatheringState",
+  "RtcIceTransportPolicy",
+  "RtcPeerConnection",
+  "RtcPeerConnectionState",
+  "RtcPeerConnectionIceEvent",
+  "RtcSdpType",
+  "RtcSessionDescription",
+  "RtcSessionDescriptionInit",
+] }
