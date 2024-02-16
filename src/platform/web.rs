@@ -3,14 +3,19 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use js_sys::Function;
-use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::UnboundedSender;
 use log::{debug, error, trace};
-
 use wasm_bindgen::{closure::Closure, convert::FromWasmAbi, JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
-use web_sys::{Event, MessageEvent, RtcBundlePolicy, RtcConfiguration, RtcDataChannel, RtcDataChannelEvent, RtcDataChannelInit, RtcIceCandidateInit, RtcIceConnectionState, RtcIceTransportPolicy, RtcPeerConnection, RtcPeerConnectionIceEvent, RtcPeerConnectionState, RtcSessionDescriptionInit};
-use webrtc::{ice_transport::{ice_candidate::RTCIceCandidateInit, ice_server::RTCIceServer}, peer_connection::{configuration::RTCConfiguration, sdp::session_description::RTCSessionDescription}};
+use web_sys::{Event, MessageEvent, RtcBundlePolicy, RtcConfiguration, RtcDataChannel, RtcDataChannelEvent, RtcIceCandidateInit, RtcIceConnectionState, RtcIceTransportPolicy, RtcPeerConnection, RtcPeerConnectionIceEvent, RtcPeerConnectionState};
+use webrtc::{ice_transport::ice_candidate::RTCIceCandidateInit, peer_connection::sdp::session_description::RTCSessionDescription};
+
+use crate::{Channel, PeerConnection, PeerConnectionBuilder};
+use super::Platform;
+
+pub struct Web {}
+impl Platform for Web {}
 
 fn handle_peer_connection_state_change(
     connection: Arc<RtcPeerConnection>,
@@ -58,8 +63,8 @@ fn handle_ice_candidate(
 }
 
 fn handle_data_channel(
-    channel: Arc<RtcDataChannel>,
-    local_channels: Arc<Mutex<Vec<(Arc<RtcDataChannel>, UnboundedReceiver<Bytes>)>>>,
+    channel: RtcDataChannel,
+    local_channels: Arc<Mutex<Vec<Arc<Channel<RtcDataChannel>>>>>,
 ) {
     let label = channel.label();
     let id = channel.id().unwrap();
@@ -87,7 +92,8 @@ fn handle_data_channel(
     );
     // push channel & receiver to list
     let mut channels = local_channels.lock().unwrap();
-    channels.push((channel, rx));
+    let channel = Arc::new(Channel { inner: channel, rx });
+    channels.push(channel);
 }
 
 fn handle_data_channel_close(
@@ -135,15 +141,14 @@ fn handle_data_channel_error(
     error!("Internal error on data channel ({label}:{id}). Error ({event:?})");
 }
 
-pub struct PeerConnection {
-    is_offerer: bool,
-    connection: Arc<RtcPeerConnection>,
-    channels: Arc<Mutex<Vec<(Arc<RtcDataChannel>, UnboundedReceiver<Bytes>)>>>,
-    candidate_rx: UnboundedReceiver<RTCIceCandidateInit>,
+impl Channel<RtcDataChannel> {
+    pub fn send(&self, data: &Bytes) -> Result<()> {
+        Ok(self.inner.send_with_u8_array(data).unwrap())
+    }
 }
 
-impl PeerConnection {
-    pub async fn get_local_description(&self) -> Option<RTCSessionDescription> {
+impl PeerConnection<RtcPeerConnection, RtcDataChannel> {
+    pub fn get_local_description(&self) -> Option<RTCSessionDescription> {
         if let Some(js_desc) = self.connection.local_description() {
             match serde_wasm_bindgen::from_value(js_desc.into()) {
                 Ok(desc) => Some(desc),
@@ -155,22 +160,6 @@ impl PeerConnection {
         } else {
             None
         }
-    }
-
-    pub fn is_offerer(&self) -> bool {
-        self.is_offerer
-    }
-
-    pub async fn get_ice_candidates(&mut self) -> Result<Vec<RTCIceCandidateInit>> {
-        let mut candidate_inits = vec![];
-        loop {
-            match self.candidate_rx.try_recv() {
-                Ok(candidate_init) => candidate_inits.push(candidate_init),
-                Err(TryRecvError::Empty) => break,
-                Err(e) => return Err(e.into())
-            }
-        }
-        Ok(candidate_inits)
     }
 
     pub async fn add_ice_candidate(&self, remote_candidate_init: RTCIceCandidateInit) -> Result<()> {
@@ -187,72 +176,8 @@ impl PeerConnection {
     }
 }
 
-
-pub struct PeerConnectionBuilder {
-    config: RTCConfiguration,
-    outgoing_buffer: usize,
-    remote_offer: Option<RTCSessionDescription>,
-    channel_options: Vec<(String, RtcDataChannelInit)>
-}
-
-impl Default for PeerConnectionBuilder {
-    fn default() -> Self {
-        let config = RTCConfiguration {
-            ice_servers: vec![RTCIceServer {
-                urls: vec![
-                    "stun:stun.l.google.com:19302".to_owned(),
-                    "stun:stun1.l.google.com:19302".to_owned(),
-                ],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let outgoing_buffer = 16;
-
-        Self {
-            config,
-            outgoing_buffer,
-            remote_offer: None,
-            channel_options: vec![],
-        }
-    }
-}
-
-impl PeerConnectionBuilder {
-    /// Create new DataChannelBuilder (equivalent to DataChannelBuilder::default())
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Specify internal WebRTC peer configuration settings
-    pub fn set_config(&mut self, set: RTCConfiguration) -> &Self {
-        self.config = set;
-        self
-    }
-
-    /// Specify outgoing data channel buffer size
-    pub fn set_outgoing_buffer(&mut self, set: usize) -> &Self {
-        self.outgoing_buffer = set;
-        self
-    }
-
-    /// Provide an Offer as created by a remote peer
-    ///
-    /// This option is mutually exclusive with the `with_channel_` settings.
-    pub fn with_remote_offer(&mut self, set: Option<RTCSessionDescription>) -> &Self {
-        self.remote_offer = set;
-        self
-    }
-
-    /// Provide options for initial data channel creation (as an offerer)
-    ///
-    /// This option is mutually exclusive with `with_remote_offer`.
-    pub fn with_channel_options(&mut self, set: Vec<(String, RtcDataChannelInit)>) -> &Self {
-        self.channel_options = set;
-        self
-    }
-
-    pub async fn build(&self) -> Result<PeerConnection> {
+impl PeerConnectionBuilder<Web> {
+    pub async fn build(&self) -> Result<PeerConnection<RtcPeerConnection, RtcDataChannel>> {
         // validate builder
         if self.remote_offer.is_some() && (!self.channel_options.is_empty()) {
             return Err(anyhow!("remote offer is mutually exclusive with channel settings"));
@@ -303,7 +228,7 @@ impl PeerConnectionBuilder {
             move |event| handle_ice_candidate(event, &candidate_tx)
         );
 
-        let channels: Arc<Mutex<Vec<(Arc<RtcDataChannel>, UnboundedReceiver<Bytes>)>>> = Arc::new(Mutex::new(vec![]));
+        let channels: Arc<Mutex<Vec<Arc<Channel<RtcDataChannel>>>>> = Arc::new(Mutex::new(vec![]));
         // if an offer is provided, we are an answerer and are receiving the data channel
         // otherwise, we are an offerer and must configure and create the data channel
         let (desc, is_offerer) = if let Some(offer) = &self.remote_offer {
@@ -312,31 +237,33 @@ impl PeerConnectionBuilder {
             register_leaky_event_handler(
                 |f| connection.set_ondatachannel(f),
                 move |event: RtcDataChannelEvent| {
-                    let channel = Arc::new(event.channel());
+                    let channel = event.channel();
                     handle_data_channel(channel, channels_ref.clone());
                 }
             );
             // set the remote SessionDescription (provided by remote peer via external signalling)
             let js_value = serde_wasm_bindgen::to_value(offer).unwrap();
-            let js_promise = connection.set_remote_description(&js_value_to_desc(js_value)?);
+            let js_promise = connection.set_remote_description(&js_value_to_dict(js_value)?);
             let _ = JsFuture::from(js_promise).await.unwrap();
             // create answer
             let js_promise = connection.create_answer();
             let js_value = JsFuture::from(js_promise).await.unwrap();
-            let answer = js_value_to_desc(js_value)?;
+            let answer = js_value_to_dict(js_value)?;
             (answer, false)
         } else {
 
             // create channels from options (we are offering)
             for (index, (label_prefix, channel_options)) in self.channel_options.iter().enumerate() {
-                let channel = connection.create_data_channel_with_data_channel_dict(&format!("{label_prefix}{index}"), channel_options);
-                handle_data_channel(Arc::new(channel), channels.clone())
+                let js_value = serde_wasm_bindgen::to_value(channel_options).unwrap();
+                let data_channel_dict = js_value_to_dict(js_value)?;
+                let channel = connection.create_data_channel_with_data_channel_dict(&format!("{label_prefix}{index}"), &data_channel_dict);
+                handle_data_channel(channel, channels.clone())
             }
 
             // create offer
             let js_promise = connection.create_offer();
             let js_value = JsFuture::from(js_promise).await.unwrap();
-            let offer = js_value_to_desc(js_value)?;
+            let offer = js_value_to_dict(js_value)?;
 
             (offer, true)
         };
@@ -362,13 +289,13 @@ fn register_leaky_event_handler<T: FromWasmAbi + 'static>(
     closure.forget();
 }
 
-fn js_value_to_desc(
+fn js_value_to_dict<T: JsCast>(
     value: JsValue,
-) -> Result<RtcSessionDescriptionInit> {
-    if RtcSessionDescriptionInit::is_type_of(&value) {
-        let desc = RtcSessionDescriptionInit::unchecked_from_js(value);
+) -> Result<T> {
+    if T::is_type_of(&value) {
+        let desc = T::unchecked_from_js(value);
         Ok(desc)
     } else {
-        return Err(anyhow!("Could not create RtcSessionDescriptionInit from JsValue"));
+        return Err(anyhow!("Could not create dict from JsValue"));
     }
 }
