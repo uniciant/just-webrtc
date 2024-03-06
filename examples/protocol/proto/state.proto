@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package state_pb;
+
+message RtcSignal {
+    bytes offer = 1;
+    bytes candidates = 3;
+    optional bytes answer = 2;
+}
+
+message SignallingState {
+    map<uint64, RtcSignal> signals = 1;
+}
