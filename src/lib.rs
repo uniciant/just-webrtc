@@ -1,11 +1,14 @@
-use std::{marker::PhantomData, sync::{Arc, Mutex}};
+use std::{marker::PhantomData, sync::Arc};
 
-use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use platform::Platform;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
-use webrtc::{ice_transport::{ice_candidate::RTCIceCandidateInit, ice_server::RTCIceServer}, peer_connection::{configuration::RTCConfiguration, sdp::session_description::RTCSessionDescription}};
+
+use tokio::sync::{mpsc::{error::TryRecvError, UnboundedReceiver}, watch};
+pub use webrtc::{
+    ice_transport::{ice_candidate::RTCIceCandidateInit, ice_server::RTCIceServer, ice_gatherer_state::RTCIceGathererState},
+    peer_connection::{configuration::RTCConfiguration, sdp::session_description::RTCSessionDescription, peer_connection_state::RTCPeerConnectionState}
+};
 
 pub mod platform;
 
@@ -41,53 +44,69 @@ pub struct DataChannelConfig {
 
 pub struct Channel<T> {
     inner: T,
+    ready_state_rx: watch::Receiver<bool>,
     rx: UnboundedReceiver<Bytes>,
 }
 
 impl<T> Channel<T> {
-    pub async fn receive(&mut self) -> Result<Bytes> {
-        if let Some(data) = self.rx.recv().await {
-            Ok(data)
-        } else {
-            Err(anyhow!("rx channel closed!"))
-        }
+    pub async fn wait_ready(&mut self) -> Result<(), watch::error::RecvError> {
+        let _ = self.ready_state_rx.wait_for(|s| s == &true).await?;
+        Ok(())
     }
 
-    pub fn try_receive(&mut self) -> Result<Bytes> {
-        Ok(self.rx.try_recv()?)
+    pub async fn receive(&mut self) -> Option<Bytes> {
+        self.rx.recv().await
     }
 
+    pub fn try_receive(&mut self) -> Result<Bytes, TryRecvError> {
+        self.rx.try_recv()
+    }
 }
 
-pub struct PeerConnection<T, U> {
+pub struct GenericPeerConnection<T, U> {
     is_offerer: bool,
     connection: Arc<T>,
-    channels: Arc<Mutex<Vec<Arc<Channel<U>>>>>,
-    candidate_rx: UnboundedReceiver<RTCIceCandidateInit>,
+    peer_connection_state_rx: watch::Receiver<RTCPeerConnectionState>,
+    channels_rx: UnboundedReceiver<Channel<U>>,
+    candidate_rx: UnboundedReceiver<Option<RTCIceCandidateInit>>,
 }
 
-impl<T, U> PeerConnection<T, U> {
+impl<T, U> GenericPeerConnection<T, U> {
     pub fn is_offerer(&self) -> bool {
         self.is_offerer
     }
 
-    pub fn get_channel(&self, index: usize) -> Result<Arc<Channel<U>>> {
-        let channels = self.channels.lock().unwrap();
-        let channel = channels.get(index).unwrap();
-        Ok(channel.clone())
+    pub async fn wait_peer_connected(&mut self) -> Result<(), watch::error::RecvError> {
+        let _ = self.peer_connection_state_rx.wait_for(|s| s == &RTCPeerConnectionState::Connected).await?;
+        Ok(())
     }
 
-    pub fn try_get_ice_candidates(&mut self) -> Result<Vec<RTCIceCandidateInit>> {
+    pub async fn receive_channel(&mut self) -> Option<Channel<U>> {
+        self.channels_rx.recv().await
+    }
+
+    pub fn try_receive_channel(&mut self) -> Result<Channel<U>, TryRecvError> {
+        self.channels_rx.try_recv()
+    }
+
+    /// Collect all ICE candidates for the current negotiation
+    pub async fn collect_ice_candidates(&mut self) -> Vec<RTCIceCandidateInit> {
         let mut candidate_inits = vec![];
         loop {
-            match self.candidate_rx.try_recv() {
-                Ok(candidate_init) => candidate_inits.push(candidate_init),
-                Err(TryRecvError::Empty) => break,
-                Err(e) => return Err(e.into())
+            match self.candidate_rx.recv().await {
+                Some(Some(candidate_init)) => candidate_inits.push(candidate_init),
+                _ => return candidate_inits,
             }
         }
-        Ok(candidate_inits)
     }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum PeerConnectionBuilderError<E> {
+    #[error("remote offer is mutually exclusive with channel settings!")]
+    ConflictingBuildOptions,
+    #[error("webrtc error ({0})")]
+    WebRTCError(#[from] E)
 }
 
 pub struct PeerConnectionBuilder<P: Platform> {
@@ -103,8 +122,8 @@ impl<P: Platform> Default for PeerConnectionBuilder<P> {
         let config = RTCConfiguration {
             ice_servers: vec![RTCIceServer {
                 urls: vec![
-                    "stun:stun.l.google.com:19302".to_owned(),
-                    "stun:stun1.l.google.com:19302".to_owned(),
+                    "stun:stun.l.google.com:19302".to_string(),
+                    "stun:stun1.l.google.com:19302".to_string(),
                 ],
                 ..Default::default()
             }],
@@ -123,7 +142,7 @@ impl<P: Platform> Default for PeerConnectionBuilder<P> {
 }
 
 impl<P: Platform> PeerConnectionBuilder<P> {
-    /// Create new DataChannelBuilder (equivalent to DataChannelBuilder::default())
+    /// Create new PeerConnectionBuilder (equivalent to PeerConnectionBuilder::default())
     pub fn new() -> Self {
         Self::default()
     }
