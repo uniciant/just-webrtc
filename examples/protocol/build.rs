@@ -8,6 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("proto file should reside in a directory");
     prost_build::Config::new()
         .file_descriptor_set_path("file_descriptor_set.bin")
+        .enable_type_names()
         .compile_protos(&[proto_path], &[proto_dir])?;
     Ok(())
 }

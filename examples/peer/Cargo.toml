@@ -14,13 +14,13 @@ bincode = "1.3"
 protocol = { path = "../protocol" }
 log = "0.4"
 futures = "0.3.30"
+zduny-wasm-timer = "0.2.8"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_log = "1.0"
 tokio = { version = "1.36", default-features = false, features = ["sync"] }
-poll-promise = { version = "0.3.0", features = ["web"] }
+wasm-bindgen-futures = "0.4.42"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pretty_env_logger = "0.5"
 tokio = { version = "1.36", default-features = false, features = ["rt-multi-thread", "macros", "sync"] }
-poll-promise = { version = "0.3.0", features = ["tokio"] }
