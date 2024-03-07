@@ -1,4 +1,5 @@
-/target
+/target/
 .vscode
 Cargo.lock
-*.bin
+**.bin
+dist/
