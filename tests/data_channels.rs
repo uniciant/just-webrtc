@@ -1,19 +1,18 @@
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
 
-use just_webrtc::{DataChannelConfig, PeerConnectionBuilder};
+use just_webrtc::{types::DataChannelOptions, PeerConnectionBuilder};
 
 #[tokio::test]
 async fn test_data_channel() -> Result<()> {
     pretty_env_logger::try_init()?;
     // create local peer connection from channel options
     let channel_options = vec![
-        (format!("test_channel_"), DataChannelConfig::default())
+        (format!("test_channel_"), DataChannelOptions::default())
     ];
     let mut local_peer_connection = PeerConnectionBuilder::new()
-        .with_channel_options(channel_options)
-        .build()
-        .await?;
+        .with_channel_options(channel_options)?
+        .build().await?;
     // output offer and candidates for remote peer
     let offer = local_peer_connection.get_local_description().await
         .ok_or(anyhow!("could not get local description! (offer)"))?;
@@ -23,9 +22,8 @@ async fn test_data_channel() -> Result<()> {
 
     // create remote peer connection from received offer and candidates
     let mut remote_peer_connection = PeerConnectionBuilder::new()
-        .with_remote_offer(Some(offer))
-        .build()
-        .await?;
+        .with_remote_offer(Some(offer))?
+        .build().await?;
     remote_peer_connection.add_ice_candidates(candidates).await?;
     // output answer and candidates for local peer
     let answer = remote_peer_connection.get_local_description().await
