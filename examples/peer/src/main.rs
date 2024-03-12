@@ -97,7 +97,7 @@ async fn local_peer_connection_task(
         let sig_state: SignallingState = read_connection.fetch_clear_set_state().to_state()?;
         if let Some(signal) = sig_state.signals.get(&local_node_id) {
             if let Some(answer) = &signal.answer {
-                let answer: SessionDescription = bincode::deserialize(&answer)?;
+                let answer: SessionDescription = bincode::deserialize(answer)?;
                 let candidates: Vec<ICECandidate> = bincode::deserialize(&signal.candidates)?;
                 break (answer, candidates)
             }
