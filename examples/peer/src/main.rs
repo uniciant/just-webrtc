@@ -119,27 +119,43 @@ async fn peer_echo_task(
     let mut channel = peer_connection.receive_channel().await.unwrap();
     channel.wait_ready().await?;
     // prepare echo request/response
-    let echo_request = bincode::serialize(ECHO_REQUEST)?.into();
-    let echo_response = bincode::serialize(ECHO_RESPONSE)?.into();
     let channel_fmt = format!("{}:{}", channel.label(), channel.id());
-    let mut interval = zduny_wasm_timer::Interval::new(Duration::from_secs(1));
-    // task loop
-    loop {
-        // wait for interval
-        interval.next().await;
-        // echo request
-        channel.send(&echo_request).await?;
-        // echo response
-        if let Some(bytes) = channel.receive().await {
-            let s: &str = bincode::deserialize(&bytes)?;
-            if s == ECHO_REQUEST {
-                info!("Received request! Sending response. ({channel_fmt})");
-                channel.send(&echo_response).await?;
+    // if offerer, we send echo requests, otherwise we listen for requests
+    if peer_connection.is_offerer() {
+        let echo_request = bincode::serialize(ECHO_REQUEST)?.into();
+        let mut interval = zduny_wasm_timer::Interval::new(Duration::from_secs(1));
+        loop {
+            interval.next().await;
+            // offerer makes echo requests
+            info!("Sending echo request!");
+            let instant = zduny_wasm_timer::Instant::now();
+            channel.send(&echo_request).await?;
+            // await response
+            if let Some(bytes) = channel.receive().await {
+                let s: &str = bincode::deserialize(&bytes)?;
+                if s == ECHO_RESPONSE {
+                    let elapsed_us = instant.elapsed().as_micros();
+                    info!("Received echo response!({channel_fmt}) ({elapsed_us}us)");
+                }
+            } else {
+                break Err(anyhow!("remote channel closed! ({channel_fmt})"));
             }
-        } else {
-            break Err(anyhow!("remote channel closed! ({channel_fmt})"));
-        }
-    }?;
+        }?;
+    } else {
+        let echo_response = bincode::serialize(ECHO_RESPONSE)?.into();
+        loop {
+            // await request
+            if let Some(bytes) = channel.receive().await {
+                let s: &str = bincode::deserialize(&bytes)?;
+                if s == ECHO_REQUEST {
+                    info!("Received echo request! Sending response. ({channel_fmt})");
+                    channel.send(&echo_response).await?;
+                }
+            } else {
+                break Err(anyhow!("remote channel closed! ({channel_fmt})"));
+            }
+        }?;
+    }
     Ok(TaskReturnType::Echo)
 }
 
@@ -150,13 +166,13 @@ enum TaskReturnType {
 }
 
 async fn run_peer(addr: &str) -> Result<()> {
-    let neshi_client = Arc::new(NodeClient::new(format!("http://{addr}")));
+    let neshi_client = Arc::new(NodeClient::new(format!("http://{addr}"), None));
     // get existing nodes from neshi server
     let nodes = neshi_client.get_nodes().await?;
     // advertise self as node on neshi server
     let metadata = SignallingMetadata {};
     let neshi_node_metadata = NodeMeta::new::<SignallingMetadata, SignallingState>(FILE_DESCRIPTOR_SET, &metadata)?;
-    let neshi_local_node_id = neshi_client.register_node(neshi_node_metadata.clone()).await?;
+    let neshi_local_node_id = neshi_client.register_node(&neshi_node_metadata).await?;
 
     // create unordered tasks queue
     let mut tasks = FuturesUnordered::<Pin<Box<dyn Future<Output = Result<TaskReturnType>>>>>::new();
