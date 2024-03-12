@@ -158,7 +158,7 @@ impl PeerConnection {
     }
 
     pub async fn set_remote_description(&self, remote_answer: SessionDescription) -> Result<(), webrtc::Error> {
-        Ok(self.connection.set_remote_description(remote_answer.try_into()?).await?)
+        self.connection.set_remote_description(remote_answer.try_into()?).await
     }
 }
 
