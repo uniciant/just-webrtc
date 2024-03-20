@@ -31,82 +31,46 @@ pub enum ClientError {
     Other(#[from] anyhow::Error),
 }
 
-pub struct PeerListener {
-    inner: Streaming<PeerListenerRsp>
-}
-
-impl PeerListener {
-    /// Listen for discovery of remote peers
-    ///
-    /// Returns vector of all remote peer ids
-    pub async fn listen(&mut self) -> Result<Vec<PeerChange>, ClientError> {
-        match self.inner.message().await? {
-            Some(message) => {
-                Ok(message.peer_changes)
-            },
-            None => Err(ClientError::ListenerClosed)
-        }
-    }
-}
-
 pub struct SignalSet {
     pub desc: SessionDescription,
     pub candidates: Vec<ICECandidate>,
     pub remote_id: u64,
 }
 
-pub struct OfferListener {
-    inner: Streaming<OfferListenerRsp>
-}
-
-impl OfferListener {
-    /// Listen for offers from remote peers.
-    ///
-    /// Returns offer signal set
-    pub async fn listen(&mut self) -> Result<SignalSet, ClientError> {
-        match self.inner.message().await? {
-            Some(message) => {
-                let signal = message.offer_signal.ok_or(ClientError::InvalidResponse)?;
-                let offer = bincode::deserialize(&signal.offer)?;
-                let candidates = bincode::deserialize(&signal.candidates)?;
-                Ok(SignalSet { desc: offer, candidates, remote_id: signal.offerer_id })
-            },
-            None => Err(ClientError::ListenerClosed)
-        }
+async fn peer_listener_task(mut listener: Streaming<PeerListenerRsp>) -> Result<TaskReturnType, ClientError> {
+    if let Some(message) = listener.message().await? {
+        Ok(TaskReturnType::PeerListener(listener, message.peer_changes))
+    } else {
+        Err(ClientError::ListenerClosed)
     }
 }
 
-
-pub struct AnswerListener {
-    inner: Streaming<AnswerListenerRsp>
+async fn offer_listener_task(mut listener: Streaming<OfferListenerRsp>) -> Result<TaskReturnType, ClientError> {
+    if let Some(message) = listener.message().await? {
+        let signal = message.offer_signal.ok_or(ClientError::InvalidResponse)?;
+        let offer = bincode::deserialize(&signal.offer)?;
+        let candidates = bincode::deserialize(&signal.candidates)?;
+        let offer_set = SignalSet { desc: offer, candidates, remote_id: signal.offerer_id };
+        Ok(TaskReturnType::OfferListener(offer_set, listener))
+    } else {
+        Err(ClientError::ListenerClosed)
+    }
 }
 
-impl AnswerListener {
-    /// Listen for answers from remote peers.
-    ///
-    /// Returns answer signal set
-    pub async fn listen(&mut self) -> Result<SignalSet, ClientError> {
-        match self.inner.message().await? {
-            Some(message) => {
-                let signal = message.answer_signal.ok_or(ClientError::InvalidResponse)?;
-                let answer = bincode::deserialize(&signal.answer)?;
-                let candidates = bincode::deserialize(&signal.candidates)?;
-                Ok(SignalSet { desc: answer, candidates, remote_id: signal.answerer_id })
-            },
-            None => Err(ClientError::ListenerClosed)
-        }
+async fn answer_listener_task(mut listener: Streaming<AnswerListenerRsp>) -> Result<TaskReturnType, ClientError> {
+    if let Some(message) = listener.message().await? {
+        let signal = message.answer_signal.ok_or(ClientError::InvalidResponse)?;
+        let answer = bincode::deserialize(&signal.answer)?;
+        let candidates = bincode::deserialize(&signal.candidates)?;
+        let answer_set = SignalSet { desc: answer, candidates, remote_id: signal.answerer_id };
+        Ok(TaskReturnType::AnswerListener(answer_set, listener))
+    } else  {
+        Err(ClientError::ListenerClosed)
     }
 }
 
 pub struct RtcSignallingClient {
-    local_id: u64,
     grpc_metadata: MetadataMap,
-    discovered_peers: HashSet<u64>,
-
-    peer_listener: Option<PeerListener>,
-    offer_listener: Option<OfferListener>,
-    answer_listener: Option<AnswerListener>,
-
     #[cfg(not(target_arch = "wasm32"))]
     inner: Mutex<crate::pb::rtc_signalling_client::RtcSignallingClient<tonic::transport::Channel>>,
     #[cfg(target_arch = "wasm32")]
@@ -128,63 +92,142 @@ impl RtcSignallingClient {
         let (grpc_metadata, _, _) = tmp_req.into_parts();
         // create the client
         #[cfg(not(target_arch = "wasm32"))]
-        let mut client = crate::pb::rtc_signalling_client::RtcSignallingClient::<tonic::transport::Channel>::connect(addr).await?;
+        let client = crate::pb::rtc_signalling_client::RtcSignallingClient::<tonic::transport::Channel>::connect(addr).await?;
         #[cfg(target_arch = "wasm32")]
-        let mut client = crate::pb::rtc_signalling_client::RtcSignallingClient::<tonic_web_wasm_client::Client>::new(addr);
+        let client = crate::pb::rtc_signalling_client::RtcSignallingClient::<tonic_web_wasm_client::Client>::new(addr);
         // advertise local peer
-        let request = Request::from_parts(grpc_metadata.clone(), Extensions::default(), AdvertiseReq {});
-        let response = client.advertise(request).await?;
-        let local_id = response.into_inner().local_peer.ok_or(ClientError::InvalidResponse)?.id;
-        // open peer listener
-        let request = Request::from_parts(
-            grpc_metadata.clone(),
-            Extensions::default(),
-            PeerListenerReq { local_peer: Some(PeerId { id: local_id }) }
-        );
-        let response = client.open_peer_listener(request).await?;
-        let peer_listener = response.into_inner();
-        // open offer listener
-        let request = Request::from_parts(
-            grpc_metadata.clone(),
-            Extensions::default(),
-            OfferListenerReq { local_peer: Some(PeerId { id: local_id }) }
-        );
-        let response = client.open_offer_listener(request).await?;
-        let offer_listener = response.into_inner();
-        // open answer listener
-        let request = Request::from_parts(
-            grpc_metadata.clone(),
-            Extensions::default(),
-            AnswerListenerReq { local_peer: Some(PeerId { id: local_id }) }
-        );
-        let response = client.open_answer_listener(request).await?;
-        let answer_listener = response.into_inner();
         // return connected client
         Ok(Self {
-            local_id,
             grpc_metadata,
-            discovered_peers: HashSet::new(),
-            peer_listener: Some(PeerListener { inner: peer_listener }),
-            offer_listener: Some(OfferListener { inner: offer_listener }),
-            answer_listener: Some(AnswerListener { inner: answer_listener }),
             inner: Mutex::new(client),
         })
     }
+}
 
-    /// Request list of remote peers
-    ///
-    /// Returns resulting vec of remote peer IDs
-    pub async fn peer_discover(&mut self) -> Result<Vec<u64>, ClientError> {
+/// Private helper methods
+impl RtcSignallingClient {
+    async fn advertise(&self) -> Result<u64, tonic::Status> {
+        let request = Request::from_parts(self.grpc_metadata.clone(), Extensions::default(), AdvertiseReq {});
+        let response = {
+            let mut client = self.inner.lock().await;
+            client.advertise(request).await?
+        };
+        let local_id = response.into_inner().local_peer.unwrap().id;
+        Ok(local_id)
+    }
+
+    async fn _peer_discover(&self, id: u64) -> Result<Vec<u64>, tonic::Status> {
         let request = Request::from_parts(
             self.grpc_metadata.clone(),
             Extensions::default(),
-            PeerDiscoverReq { local_peer: Some(PeerId { id: self.local_id }) }
+            PeerDiscoverReq { local_peer: Some(PeerId { id }) }
         );
         let response = {
             let mut client = self.inner.lock().await;
             client.peer_discover(request).await?
         };
         Ok(response.into_inner().remote_peers.into_iter().map(|peer| peer.id).collect())
+    }
+
+    async fn open_peer_listener(&self, id: u64) -> Result<Streaming<PeerListenerRsp>, tonic::Status> {
+        let request = Request::from_parts(
+            self.grpc_metadata.clone(),
+            Extensions::default(),
+            PeerListenerReq { local_peer: Some(PeerId { id }) }
+        );
+        let response = {
+            let mut client = self.inner.lock().await;
+            client.open_peer_listener(request).await?
+        };
+        let peer_listener = response.into_inner();
+        Ok(peer_listener)
+    }
+
+    async fn open_offer_listener(&self, id: u64) -> Result<Streaming<OfferListenerRsp>, tonic::Status> {
+        let request = Request::from_parts(
+            self.grpc_metadata.clone(),
+            Extensions::default(),
+            OfferListenerReq { local_peer: Some(PeerId { id }) }
+        );
+        let response = {
+            let mut client = self.inner.lock().await;
+            client.open_offer_listener(request).await?
+        };
+        let offer_listener = response.into_inner();
+        Ok(offer_listener)
+    }
+
+    async fn open_answer_listener(&self, id: u64) -> Result<Streaming<AnswerListenerRsp>, tonic::Status> {
+        let request = Request::from_parts(
+            self.grpc_metadata.clone(),
+            Extensions::default(),
+            AnswerListenerReq { local_peer: Some(PeerId { id }) }
+        );
+        let response = {
+            let mut client = self.inner.lock().await;
+            client.open_answer_listener(request).await?
+        };
+        let answer_listener = response.into_inner();
+        Ok(answer_listener)
+    }
+
+    async fn signal_answer<A, C>(
+        &self,
+        id: u64,
+        remote_id: u64,
+        answer: &A,
+        candidates: &C,
+    ) -> Result<(), ClientError>
+    where
+        A: ?Sized + serde::Serialize,
+        C: ?Sized + serde::Serialize,
+    {
+        let answer_signal = SignalAnswer {
+            answerer_id: id,
+            candidates: bincode::serialize(candidates)?,
+            answer: bincode::serialize(answer)?,
+        };
+        let request = Request::from_parts(self.grpc_metadata.clone(), Extensions::default(),
+            SignalAnswerReq {
+                offerer_peer: Some(PeerId { id: remote_id }),
+                answer_signal: Some(answer_signal),
+            }
+        );
+        let _response = {
+            let mut client = self.inner.lock().await;
+            client.signal_answer(request).await?;
+        };
+        Ok(())
+    }
+
+    async fn signal_offer<O, C>(
+        &self,
+        id: u64,
+        remote_id: u64,
+        offer: &O,
+        candidates: &C,
+    ) -> Result<(), ClientError>
+    where
+        O: ?Sized + serde::Serialize,
+        C: ?Sized + serde::Serialize,
+    {
+        let offer_signal = SignalOffer {
+            offerer_id: id,
+            candidates: bincode::serialize(&candidates)?,
+            offer: bincode::serialize(&offer)?,
+        };
+        let request = Request::from_parts(self.grpc_metadata.clone(), Extensions::default(),
+            SignalOfferReq {
+                answerer_peer: Some(PeerId { id: remote_id }),
+                offer_signal: Some(offer_signal),
+            }
+        );
+        // queue signalling of offer
+        let _response = {
+            let mut client = self.inner.lock().await;
+            client.signal_offer(request).await?;
+        };
+        Ok(())
     }
 }
 
@@ -194,13 +237,13 @@ enum TaskReturnType {
     ///
     /// PeerListener receives a list of remote peers.
     /// On first iteration, for each remote peer, create a local peer connection...
-    PeerListener(PeerListener, Vec<PeerChange>),
+    PeerListener(Streaming<PeerListenerRsp>, Vec<PeerChange>),
     /// Local peer connections generate offers...
     CreateOffer(SignalSet),
     /// Offers are signalled to the remote peers...
     SignalOffer,
     /// Listen for answers from the remote peers...
-    AnswerListener(SignalSet, AnswerListener),
+    AnswerListener(SignalSet, Streaming<AnswerListenerRsp>),
     /// Finally, we wait to receive answer responses from the remote peers.
     /// Completing a "local" signalling chain
     ReceiveAnswer(u64),
@@ -208,7 +251,7 @@ enum TaskReturnType {
     /// Start of a "remote" signalling chain
     ///
     /// OfferListener receives a remote offer.
-    OfferListener(SignalSet, OfferListener),
+    OfferListener(SignalSet, Streaming<OfferListenerRsp>),
     /// This offer is used to create a remote peer connection and generate an answer...
     ReceiveOffer(SignalSet),
     /// Finally, The answer is sent to the remote offerer.
@@ -218,6 +261,36 @@ enum TaskReturnType {
 }
 
 impl RtcSignallingClient {
+    async fn signal_offer_task<O, C>(
+        &self,
+        id: u64,
+        remote_id: u64,
+        offer: O,
+        candidates: C,
+    ) -> Result<TaskReturnType, ClientError>
+    where
+        O: serde::Serialize,
+        C: serde::Serialize,
+    {
+        self.signal_offer(id, remote_id, &offer, &candidates).await?;
+        Ok(TaskReturnType::SignalOffer)
+    }
+
+    async fn signal_answer_task<A, C>(
+        &self,
+        id: u64,
+        remote_id: u64,
+        answer: A,
+        candidates: C,
+    ) -> Result<TaskReturnType, ClientError>
+    where
+        A: serde::Serialize,
+        C: serde::Serialize,
+    {
+        self.signal_answer(id, remote_id, &answer, &candidates).await?;
+        Ok(TaskReturnType::SignalAnswer(remote_id))
+    }
+
     /// Run signalling client
     ///
     /// Concurrent tasks are managed internally
@@ -235,7 +308,7 @@ impl RtcSignallingClient {
         RemoteSigCpltFut,
         E,
     >(
-        &mut self,
+        &self,
         create_offer: &CreateOfferF,
         receive_answer: &ReceiveAnswerF,
         local_sig_cplt: &LocalSigCpltF,
@@ -257,52 +330,40 @@ impl RtcSignallingClient {
     {
         // concurrent tasks
         let mut tasks: FuturesUnordered<Pin<Box<dyn Future<Output = Result<TaskReturnType, ClientError>>>>> = FuturesUnordered::new();
-        // queue initial peer listener task
-        let mut peer_listener = self.peer_listener.take().ok_or(ClientError::ListenerUnavailable)?;
-        let peer_listener_task = async {
-            let peer_changes = peer_listener.listen().await?;
-            Ok(TaskReturnType::PeerListener(peer_listener, peer_changes))
-        }.boxed_local();
-        tasks.push(peer_listener_task);
-        // queue initial offer listener task
-        let mut offer_listener = self.offer_listener.take().ok_or(ClientError::ListenerUnavailable)?;
-        let offer_listener_task = async {
-            let offer_signal = offer_listener.listen().await?;
-            Ok(TaskReturnType::OfferListener(offer_signal, offer_listener))
-        }.boxed_local();
-        tasks.push(offer_listener_task);
-        // queue initial answer listener task
-        let mut answer_listener = self.answer_listener.take().ok_or(ClientError::ListenerUnavailable)?;
-        let answer_listener_task = async {
-            let answer_signal = answer_listener.listen().await?;
-            Ok(TaskReturnType::AnswerListener(answer_signal, answer_listener))
-        }.boxed_local();
-        tasks.push(answer_listener_task);
+        let id = self.advertise().await?;
+        // open peer listener & queue initial listener task
+        let peer_listener = self.open_peer_listener(id).await?;
+        tasks.push(peer_listener_task(peer_listener).boxed_local());
+        // open offer listener & queue initial listener task
+        let offer_listener = self.open_offer_listener(id).await?;
+        tasks.push(offer_listener_task(offer_listener).boxed_local());
+        // open answer listener & queue initial listener task
+        let answer_listener = self.open_answer_listener(id).await?;
+        tasks.push(answer_listener_task(answer_listener).boxed_local());
+
+        let mut discovered_peers = HashSet::new();
+
         // run tasks in concurrent state machine
         while let Some(result) = tasks.next().await {
             match result? {
-                TaskReturnType::PeerListener(mut peer_listener, peer_changes) => {
-                    debug!("peer listener task completed ({:#016x})", self.local_id);
+                TaskReturnType::PeerListener(peer_listener, peer_changes) => {
+                    debug!("peer listener task completed ({id:#016x})");
                     // requeue peer listener task
-                    let peer_listener_task = async {
-                        let peer_changes = peer_listener.listen().await?;
-                        Ok(TaskReturnType::PeerListener(peer_listener, peer_changes))
-                    }.boxed_local();
-                    tasks.push(peer_listener_task);
+                    tasks.push(peer_listener_task(peer_listener).boxed_local());
                     // save initial state of discovered peers list
-                    let first_discovery = self.discovered_peers.is_empty();
+                    let first_discovery = discovered_peers.is_empty();
                     // apply peer changes to discovered peers map
                     for peer_change in peer_changes.iter() {
                         match peer_change.change() {
                             Change::PeerChangeAdd => {
-                                if self.discovered_peers.insert(peer_change.id) {
+                                if discovered_peers.insert(peer_change.id) {
                                     info!("Discovered peer ({:#016x}).", peer_change.id);
                                 } else {
                                     warn!("Rediscovered peer ({:#016x}). Local discovered peers is out of sync!", peer_change.id);
                                 }
                             },
                             Change::PeerChangeRemove => {
-                                if self.discovered_peers.remove(&peer_change.id) {
+                                if discovered_peers.remove(&peer_change.id) {
                                     warn!("Remote peer ({:#016x}) dropped by signalling. Existing connections with this peer will dangle.", peer_change.id);
                                 } else {
                                     warn!("Undiscovered remote peer ({:#016x}) dropped by signalling. Local discovered peers is out of sync!", peer_change.id);
@@ -315,12 +376,12 @@ impl RtcSignallingClient {
                         let create_offer_tasks = peer_changes.iter()
                             .filter_map(|peer_change|
                                 if peer_change.change() == Change::PeerChangeAdd {
-                                    let id = peer_change.id;
+                                    let remote_id = peer_change.id;
                                     let create_offer_task = async move {
-                                        let offer_signal = create_offer(id).await?;
+                                        let offer_signal = create_offer(remote_id).await?;
                                         Ok(TaskReturnType::CreateOffer(offer_signal))
                                     }.boxed_local();
-                                    info!("starting local signalling chain. (remote: {id:#016x}");
+                                    info!("starting local signalling chain. (remote: {remote_id:#016x}");
                                     Some(create_offer_task)
                                 } else {
                                     None
@@ -331,40 +392,24 @@ impl RtcSignallingClient {
 
                 },
                 TaskReturnType::CreateOffer(offer_set) => {
-                    debug!("create offer task completed ({:#016x})", self.local_id);
-                    // build signal and request
-                    let offer_signal = SignalOffer {
-                        offerer_id: self.local_id,
-                        candidates: bincode::serialize(&offer_set.candidates)?,
-                        offer: bincode::serialize(&offer_set.desc)?,
-                    };
-                    let request = Request::from_parts(self.grpc_metadata.clone(), Extensions::default(),
-                        SignalOfferReq {
-                            answerer_peer: Some(PeerId { id: offer_set.remote_id }),
-                            offer_signal: Some(offer_signal),
-                        }
-                    );
+                    debug!("create offer task completed ({id:#016x})");
                     // queue signalling of offer
-                    let signal_offer_task = async {
-                        let mut client = self.inner.lock().await;
-                        client.signal_offer(request).await?;
-                        Ok(TaskReturnType::SignalOffer)
-                    }.boxed_local();
-                    tasks.push(signal_offer_task);
+                    tasks.push(self.signal_offer_task(
+                        id,
+                        offer_set.remote_id,
+                        offer_set.desc,
+                        offer_set.candidates
+                    ).boxed_local());
                 },
                 TaskReturnType::SignalOffer => {
-                    debug!("signal offer task completed ({:#016x})", self.local_id);
+                    debug!("signal offer task completed ({id:#016x})");
                     // do nothing
                     // chain continues when answer listener receives an answer
                 },
-                TaskReturnType::AnswerListener(answer_set, mut answer_listener) => {
-                    debug!("answer listener task completed ({:#016x})", self.local_id);
+                TaskReturnType::AnswerListener(answer_set, answer_listener) => {
+                    debug!("answer listener task completed ({id:#016x})");
                     // requeue answer listener task
-                    let answer_listener_task = async {
-                        let answer_set = answer_listener.listen().await?;
-                        Ok(TaskReturnType::AnswerListener(answer_set, answer_listener))
-                    }.boxed_local();
-                    tasks.push(answer_listener_task);
+                    tasks.push(answer_listener_task(answer_listener).boxed_local());
                     // receive the answer
                     let receive_answer_task = async {
                         let remote_id = answer_set.remote_id;
@@ -374,7 +419,7 @@ impl RtcSignallingClient {
                     tasks.push(receive_answer_task);
                 },
                 TaskReturnType::ReceiveAnswer(remote_id) => {
-                    debug!("receive answer task completed ({:#016x})", self.local_id);
+                    debug!("receive answer task completed ({id:#016x})");
                     trace!("local signalling chain complete. (remote peer: {remote_id:#016x})");
                     let local_sig_cplt_task = async move {
                         local_sig_cplt(remote_id).await?;
@@ -383,14 +428,10 @@ impl RtcSignallingClient {
                     tasks.push(local_sig_cplt_task);
                 },
                 TaskReturnType::LocalSigCplt => {},
-                TaskReturnType::OfferListener(offer_set, mut offer_listener) => {
-                    debug!("offer listener task completed ({:#016x})", self.local_id);
+                TaskReturnType::OfferListener(offer_set, offer_listener) => {
+                    debug!("offer listener task completed ({id:#016x})");
                     // requeue offer listener task
-                    let offer_listener_task = async {
-                        let offer_set = offer_listener.listen().await?;
-                        Ok(TaskReturnType::OfferListener(offer_set, offer_listener))
-                    }.boxed_local();
-                    tasks.push(offer_listener_task);
+                    tasks.push(offer_listener_task(offer_listener).boxed_local());
                     // receive the offer
                     let receive_offer_task = async {
                         let answer_set = receive_offer(offer_set).await?;
@@ -399,28 +440,16 @@ impl RtcSignallingClient {
                     tasks.push(receive_offer_task);
                 },
                 TaskReturnType::ReceiveOffer(answer_set) => {
-                    debug!("receive offer task completed ({:#016x})", self.local_id);
-                    let answer_signal = SignalAnswer {
-                        answerer_id: self.local_id,
-                        candidates: bincode::serialize(&answer_set.candidates)?,
-                        answer: bincode::serialize(&answer_set.desc)?,
-                    };
-                    let request = Request::from_parts(self.grpc_metadata.clone(), Extensions::default(),
-                        SignalAnswerReq {
-                            offerer_peer: Some(PeerId { id: answer_set.remote_id }),
-                            answer_signal: Some(answer_signal),
-                        }
-                    );
-                    let signal_answer_task = async {
-                        let remote_id = request.get_ref().offerer_peer.as_ref().unwrap().id;
-                        let mut client = self.inner.lock().await;
-                        client.signal_answer(request).await?;
-                        Ok(TaskReturnType::SignalAnswer(remote_id))
-                    }.boxed_local();
-                    tasks.push(signal_answer_task);
+                    debug!("receive offer task completed ({id:#016x})");
+                    tasks.push(self.signal_answer_task(
+                        id,
+                        answer_set.remote_id,
+                        answer_set.desc,
+                        answer_set.candidates
+                    ).boxed_local());
                 },
                 TaskReturnType::SignalAnswer(remote_id) => {
-                    debug!("signal answer task completed ({:#016x})", self.local_id);
+                    debug!("signal answer task completed ({id:#016x})");
                     trace!("remote signalling chain complete. (remote peer: {remote_id:#016x})");
                     let remote_sig_cplt_task = async move {
                         remote_sig_cplt(remote_id).await?;
