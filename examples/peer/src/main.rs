@@ -1,120 +1,21 @@
-use std::{collections::HashMap, pin::Pin, sync::Arc, time::Duration};
+use std::{collections::HashMap, time::Duration};
 
 use anyhow::{anyhow, Result};
-use futures::{stream::FuturesUnordered, Future, StreamExt};
-use log::{info, warn};
-use neshi::{client::{read::NodeReadConnection, write::NodeWriteConnection, NodeClient}, metadata::pb::NodeMeta, state::pb::NodeState};
-use protocol::{metadata::pb::SignallingMetadata, state::pb::{RtcSignal, SignallingState}, FILE_DESCRIPTOR_SET};
+use futures::StreamExt;
+use log::info;
 
-use just_webrtc::{platform::PeerConnection, types::{DataChannelOptions, ICECandidate, SessionDescription}};
+use just_webrtc::{platform::PeerConnection, types::DataChannelOptions, PeerConnectionBuilder};
+use just_webrtc_signalling::client::{RtcSignallingClient, SignalSet};
+use tokio::sync::Mutex;
 
 const ECHO_REQUEST: &str = "I'm literally Ryan Gosling.";
 const ECHO_RESPONSE: &str = "I know right! He's literally me.";
 
-/// This task monitors a neshi node for requested signalling states
-/// Upon receiving a state, signalling is handled to create a remote peer connection.
-/// All remote peer connections and the write connection are then returned to create echo tasks and requeue
-async fn remote_peer_connections_task(
-    mut write_connection: NodeWriteConnection,
-) -> Result<TaskReturnType> {
-    info!("started remote peer connections task.");
-    // handle offers from peers
-    write_connection.receive_req_state().await?;
-    let node_state = write_connection.fetch_clear_req_state();
-    let mut state: SignallingState = node_state.to_state()?;
-
-    let mut peer_connections = vec![];
-    for (_remote_id, signal) in state.signals.iter_mut() {
-        if signal.answer.is_some() {
-            continue;
-        }
-        // decode remote offer and candidates
-        let remote_offer: SessionDescription = bincode::deserialize(&signal.offer)?;
-        let remote_candidates: Vec<ICECandidate> = bincode::deserialize(&signal.candidates)?;
-        // create remote peer connection
-        let mut peer_connection = just_webrtc::PeerConnectionBuilder::new()
-            .with_remote_offer(Some(remote_offer))?
-            .build().await?;
-        peer_connection.add_ice_candidates(remote_candidates).await?;
-        // encode answer and updated candidates
-        let answer = peer_connection.get_local_description().await
-            .ok_or(anyhow!("could not get local description!"))?;
-        let answer = bincode::serialize(&answer)?;
-        let candidates = peer_connection.collect_ice_candidates().await;
-        let candidates = bincode::serialize(&candidates)?;
-        // set answer and updated candidates
-        signal.answer = Some(answer);
-        signal.candidates = candidates;
-        peer_connections.push(peer_connection);
-    }
-
-    write_connection.commit_set_state(NodeState::new(&state))?;
-    write_connection.send_clear_set_state().await?;
-
-    info!("remote peer connections task complete.");
-    Ok(TaskReturnType::RemotePeerConnections((write_connection, peer_connections)))
-}
-
-/// This task awaits a neshi node for set signalling states
-/// Upon receiving a state, signalling is  handled to create a local peer connection.
-/// The local peer connection is returned for creating an echo task.
-async fn local_peer_connection_task(
-    remote_node_id: u64,
-    local_node_id: u64,
-    mut read_connection: NodeReadConnection,
-) -> Result<TaskReturnType> {
-    info!("started local peer connection task. ({remote_node_id:#x})");
-    let channel_options = vec![
-        (format!("rtc_channel_{:#x}_to_{:#x}_", local_node_id, remote_node_id), DataChannelOptions::default())
-    ];
-
-    let mut local_peer_connection = just_webrtc::PeerConnectionBuilder::new()
-        .with_channel_options(channel_options)?
-        .build().await?;
-
-    let offer = local_peer_connection.get_local_description().await
-        .ok_or(anyhow!("could not get local description!"))?;
-    let offer = bincode::serialize(&offer)?;
-    let candidates = local_peer_connection.collect_ice_candidates().await;
-    let candidates = bincode::serialize(&candidates)?;
-
-    let signal = RtcSignal {
-        offer,
-        candidates,
-        answer: None
-    };
-
-    // send signal containing offer and candidates
-    let sig_state = SignallingState {
-        signals: HashMap::from([(local_node_id, signal)])
-    };
-    read_connection.commit_req_state(NodeState::new(&sig_state))?;
-    read_connection.send_clear_req_state().await?;
-
-    // receive signal containing answer and candidates
-    let (answer, candidates) = loop {
-        read_connection.receive_set_state().await?;
-        let sig_state: SignallingState = read_connection.fetch_clear_set_state().to_state()?;
-        if let Some(signal) = sig_state.signals.get(&local_node_id) {
-            if let Some(answer) = &signal.answer {
-                let answer: SessionDescription = bincode::deserialize(answer)?;
-                let candidates: Vec<ICECandidate> = bincode::deserialize(&signal.candidates)?;
-                break (answer, candidates)
-            }
-        }
-    };
-
-    local_peer_connection.set_remote_description(answer).await?;
-    local_peer_connection.add_ice_candidates(candidates).await?;
-
-    info!("local peer connection task complete. ({remote_node_id:#x})");
-    Ok(TaskReturnType::LocalPeerConnection(local_peer_connection))
-}
-
 async fn peer_echo_task(
+    remote_id: &u64,
     mut peer_connection: PeerConnection,
-) -> Result<TaskReturnType> {
-    info!("started peer echo task.");
+) -> Result<()> {
+    info!("started peer echo task. ({remote_id})");
     peer_connection.wait_peer_connected().await?;
     let mut channel = peer_connection.receive_channel().await.unwrap();
     channel.wait_ready().await?;
@@ -156,65 +57,98 @@ async fn peer_echo_task(
             }
         }?;
     }
-    Ok(TaskReturnType::Echo)
+    Ok(())
 }
 
-enum TaskReturnType {
-    Echo,
-    LocalPeerConnection(PeerConnection),
-    RemotePeerConnections((NodeWriteConnection, Vec<PeerConnection>))
+async fn create_offer(remote_id: u64) -> Result<(SignalSet, PeerConnection)> {
+    let channel_options = vec![
+        (format!("rtc_channel_to_{:#x}_", remote_id), DataChannelOptions::default())
+    ];
+    let mut local_peer_connection = PeerConnectionBuilder::new()
+        .with_channel_options(channel_options)?
+        .build().await?;
+    let offer = local_peer_connection.get_local_description().await
+        .ok_or(anyhow!("could not get local description!"))?;
+    let candidates = local_peer_connection.collect_ice_candidates().await;
+    Ok((SignalSet { desc: offer, candidates, remote_id }, local_peer_connection))
+}
+
+async fn receive_offer(offer_set: SignalSet) -> Result<(SignalSet, PeerConnection)> {
+    let mut remote_peer_connection = PeerConnectionBuilder::new()
+        .with_remote_offer(Some(offer_set.desc))?
+        .build().await?;
+    remote_peer_connection.add_ice_candidates(offer_set.candidates).await?;
+    let answer = remote_peer_connection.get_local_description().await
+        .ok_or(anyhow!("could not get remote description!"))?;
+    let candidates = remote_peer_connection.collect_ice_candidates().await;
+    let answer_set = SignalSet {
+        desc: answer,
+        candidates,
+        remote_id: offer_set.remote_id,
+    };
+    Ok((answer_set, remote_peer_connection))
+}
+
+async fn receive_answer(
+    answer_set: SignalSet,
+    local_peer_connection: &PeerConnection,
+) -> Result<()> {
+    local_peer_connection.set_remote_description(answer_set.desc).await?;
+    local_peer_connection.add_ice_candidates(answer_set.candidates).await?;
+    Ok(())
 }
 
 async fn run_peer(addr: &str) -> Result<()> {
-    let neshi_client = Arc::new(NodeClient::new(format!("http://{addr}"), None));
-    // get existing nodes from neshi server
-    let nodes = neshi_client.get_nodes().await?;
-    // advertise self as node on neshi server
-    let metadata = SignallingMetadata {};
-    let neshi_node_metadata = NodeMeta::new::<SignallingMetadata, SignallingState>(FILE_DESCRIPTOR_SET, &metadata)?;
-    let neshi_local_node_id = neshi_client.register_node(&neshi_node_metadata).await?;
+    // map for passing peer connections
+    let peer_connections: &Mutex<HashMap<u64, PeerConnection>> = &Mutex::new(HashMap::new());
 
-    // create unordered tasks queue
-    let mut tasks = FuturesUnordered::<Pin<Box<dyn Future<Output = Result<TaskReturnType>>>>>::new();
-
-    // queue local peer connection tasks, to make offers and receive answers from older nodes...
-    for node in nodes {
-        if let Some(node_meta) = node.node_meta {
-            let neshi_client = neshi_client.clone();
-            let task = Box::pin(async move {
-                let read_connection = NodeReadConnection::connect_node(node.node_id, &node_meta, &neshi_client).await?;
-                local_peer_connection_task(node.node_id, neshi_local_node_id, read_connection).await
-            });
-            tasks.push(task);
-        }
-    }
-    // queue remote peer connections task, to receive offers and send answers to younger nodes...
-    let write_connection = NodeWriteConnection::connect_node(
-        neshi_local_node_id,
-        &neshi_node_metadata,
-        &neshi_client
-    ).await?;
-    tasks.push(Box::pin(remote_peer_connections_task(write_connection)));
-
-    // run tasks concurrently
-    while let Some(result) = tasks.next().await {
-        match result? {
-            TaskReturnType::Echo => { warn!("echo task complete!?") }
-            TaskReturnType::LocalPeerConnection(peer_connection) => {
-                // queue echo task for local peer connection
-                tasks.push(Box::pin(peer_echo_task(peer_connection)));
-            },
-            TaskReturnType::RemotePeerConnections((write_connection, peer_connections)) => {
-                // requeue the remote peer connections task
-                tasks.push(Box::pin(remote_peer_connections_task(write_connection)));
-                // queue echo tasks for remote peer connections
-                for peer_connection in peer_connections {
-                    tasks.push(Box::pin(peer_echo_task(peer_connection)));
-                }
+    let mut signalling_client = RtcSignallingClient::connect(addr.to_string(), None).await?;
+    signalling_client.run(
+        // create offer callback
+        &|remote_id| async move {
+            let (offer_set, local_peer_connection) = create_offer(remote_id).await?;
+            let mut peer_connections = peer_connections.lock().await;
+            if peer_connections.insert(remote_id, local_peer_connection).is_some() {
+                return Err(anyhow!("peer connection already exists ({remote_id:#016x})"));
             }
-        }
-    }
-
+            Ok::<_, anyhow::Error>(offer_set)
+        },
+        // receive answer callback
+        &|answer_set| async move {
+            let peer_connections = peer_connections.lock().await;
+            let local_peer_connection = peer_connections.get(&answer_set.remote_id)
+                .ok_or(anyhow!("could not get local peer connection!"))?;
+            receive_answer(answer_set, &local_peer_connection).await?;
+            Ok::<_, anyhow::Error>(())
+        },
+        // local signalling complete callback
+        // start echo task on local peer
+        &|remote_id| async move {
+            let mut peer_connections = peer_connections.lock().await;
+            let local_peer_connection = peer_connections.remove(&remote_id)
+                .ok_or(anyhow!("could not get local peer connection!"))?;
+            peer_echo_task(&remote_id, local_peer_connection).await?;
+            Ok::<_, anyhow::Error>(())
+        },
+        // receive offer callback
+        &|offer_set| async move {
+            let (answer_set, remote_peer_connection) = receive_offer(offer_set).await?;
+            let mut peer_connections = peer_connections.lock().await;
+            if peer_connections.insert(answer_set.remote_id, remote_peer_connection).is_some() {
+                return Err(anyhow!("peer connection already exists ({:#016x})", answer_set.remote_id));
+            }
+            Ok::<_, anyhow::Error>(answer_set)
+        },
+        // remote signalling complete callback
+        // start echo task on remote peer
+        &|remote_id| async move {
+            let mut peer_connections = peer_connections.lock().await;
+            let remote_peer_connection = peer_connections.remove(&remote_id)
+                .ok_or(anyhow!("could not get remote peer connection!"))?;
+            peer_echo_task(&remote_id, remote_peer_connection).await?;
+            Ok::<_, anyhow::Error>(())
+        },
+    ).await?;
     Ok(())
 }
 
@@ -222,13 +156,13 @@ async fn run_peer(addr: &str) -> Result<()> {
 // Run me via `trunk serve`!
 fn main() -> Result<()> {
     use log::error;
-    use protocol::NESHI_WEB_SERVER_ADDR;
+    use just_webrtc_signalling::TONiC_WEB_SERVER_ADDR;
 
     console_log::init_with_level(log::Level::Debug)?;
     info!("starting web peer!");
     // run locally detached
     wasm_bindgen_futures::spawn_local(async {
-        if let Err(e) = run_peer(NESHI_WEB_SERVER_ADDR).await {
+        if let Err(e) = run_peer(TONIC_WEB_SERVER_ADDR).await {
             error!("{e}")
         }
     });
@@ -238,9 +172,9 @@ fn main() -> Result<()> {
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::main]
 async fn main() -> Result<()> {
-    use protocol::NESHI_NATIVE_SERVER_ADDR;
+    use just_webrtc_signalling::TONIC_NATIVE_SERVER_ADDR;
 
     pretty_env_logger::try_init()?;
     info!("starting local peer!");
-    run_peer(NESHI_NATIVE_SERVER_ADDR).await
+    run_peer(TONIC_NATIVE_SERVER_ADDR).await
 }

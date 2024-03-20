@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use anyhow::Result;
 
 use neshi_server::{Nexus, self};
-use protocol::{NESHI_NATIVE_SERVER_ADDR, NESHI_WEB_SERVER_ADDR};
+use protocol_neshi::{NESHI_NATIVE_SERVER_ADDR, NESHI_WEB_SERVER_ADDR};
 
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
 

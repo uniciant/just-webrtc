@@ -1,5 +1,5 @@
 [package]
-name = "peer-tonic"
+name = "peer-neshi"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,15 +8,17 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 pretty_env_logger = "0.5"
-just-webrtc = { path = "../../" }
-protocol-tonic = { path = "../protocol-tonic", default-features = false, features = ["client"] }
+just-webrtc = { path = "../../crates/just-webrtc" }
+neshi = { path = "../../../neshi/crates/neshi" }
+bincode = "1.3"
+protocol-neshi = { path = "../protocol-neshi" }
 log = "0.4"
 futures = "0.3.30"
 zduny-wasm-timer = "0.2.8"
-bincode = "1.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_log = "1.0"
+tokio = { version = "1.36", default-features = false, features = ["sync"] }
 wasm-bindgen-futures = "0.4.42"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
