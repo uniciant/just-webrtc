@@ -1,7 +1,6 @@
 use std::{collections::HashSet, pin::Pin, time::Duration, future::Future};
 
 use futures::{lock::Mutex, pin_mut, select, stream::FuturesUnordered, FutureExt, StreamExt};
-use just_webrtc::types::{ICECandidate, SessionDescription};
 use log::{debug, info, trace, warn};
 use tonic::{metadata::MetadataMap, Extensions, Request, Streaming};
 
@@ -27,18 +26,21 @@ pub enum ClientError {
     #[error(transparent)]
     TonicTransport(#[from] tonic::transport::Error),
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    ExternalFn(#[from] anyhow::Error),
 }
 
+/// Just WebRTC client result type
+pub type ClientResult<T> = Result<T, ClientError>;
+
 /// Set of description, candidates and a remote peer ID.
-pub struct SignalSet {
-    pub desc: SessionDescription,
-    pub candidates: Vec<ICECandidate>,
+pub struct SignalSet<D, C> {
+    pub desc: D,
+    pub candidates: C,
     pub remote_id: u64,
 }
 
 /// Private peer listener helper method
-async fn peer_listener_task(mut listener: Streaming<PeerListenerRsp>) -> Result<(Streaming<PeerListenerRsp>, Vec<PeerChange>), ClientError> {
+async fn peer_listener_task(mut listener: Streaming<PeerListenerRsp>) -> ClientResult<(Streaming<PeerListenerRsp>, Vec<PeerChange>)> {
     if let Some(message) = listener.message().await? {
         Ok((listener, message.peer_changes))
     } else {
@@ -46,7 +48,13 @@ async fn peer_listener_task(mut listener: Streaming<PeerListenerRsp>) -> Result<
     }
 }
 /// Private offer listener helper method
-async fn offer_listener_task(mut listener: Streaming<OfferListenerRsp>) -> Result<(Streaming<OfferListenerRsp>, SignalSet), ClientError> {
+async fn offer_listener_task<O, C>(
+    mut listener: Streaming<OfferListenerRsp>
+) -> ClientResult<(Streaming<OfferListenerRsp>, SignalSet<O, C>)>
+where
+    O: serde::de::DeserializeOwned,
+    C: serde::de::DeserializeOwned,
+{
     if let Some(message) = listener.message().await? {
         let signal = message.offer_signal.ok_or(ClientError::InvalidResponse)?;
         let offer = bincode::deserialize(&signal.offer)?;
@@ -58,7 +66,13 @@ async fn offer_listener_task(mut listener: Streaming<OfferListenerRsp>) -> Resul
     }
 }
 /// Private answer listener helper method
-async fn answer_listener_task(mut listener: Streaming<AnswerListenerRsp>) -> Result<(Streaming<AnswerListenerRsp>, SignalSet), ClientError> {
+async fn answer_listener_task<A, C>(
+    mut listener: Streaming<AnswerListenerRsp>
+) -> ClientResult<(Streaming<AnswerListenerRsp>, SignalSet<A, C>)>
+where
+    A: serde::de::DeserializeOwned,
+    C: serde::de::DeserializeOwned,
+{
     if let Some(message) = listener.message().await? {
         let signal = message.answer_signal.ok_or(ClientError::InvalidResponse)?;
         let answer = bincode::deserialize(&signal.answer)?;
@@ -155,7 +169,7 @@ impl RtcSignallingClient {
         remote_id: u64,
         answer: A,
         candidates: C,
-    ) -> Result<u64, ClientError>
+    ) -> ClientResult<u64>
     where
         A: serde::Serialize,
         C: serde::Serialize,
@@ -184,7 +198,7 @@ impl RtcSignallingClient {
         remote_id: u64,
         offer: O,
         candidates: C,
-    ) -> Result<u64, ClientError>
+    ) -> ClientResult<u64>
     where
         O: serde::Serialize,
         C: serde::Serialize,
@@ -212,12 +226,12 @@ impl RtcSignallingClient {
 /// Externally implemented function creating an offer signal
 ///
 /// Returns the resulting offer signal
-pub type CreateOfferFn<E> = Box<dyn Fn(u64) -> Pin<Box<dyn Future<Output = Result<SignalSet, E>>>>>;
+pub type CreateOfferFn<O, C, E> = Box<dyn Fn(u64) -> Pin<Box<dyn Future<Output = Result<SignalSet<O, C>, E>>>>>;
 
 /// Externally implemented function receiving an answer signal
 ///
 /// Returns a result with the remote peer id
-pub type ReceiveAnswerFn<E> = Box<dyn Fn(SignalSet) -> Pin<Box<dyn Future<Output = Result<u64, E>>>>>;
+pub type ReceiveAnswerFn<A, C, E> = Box<dyn Fn(SignalSet<A, C>) -> Pin<Box<dyn Future<Output = Result<u64, E>>>>>;
 
 /// Externally implemented function handling completion of local signalling
 ///
@@ -227,7 +241,7 @@ pub type LocalSigCpltFn<E> = Box<dyn Fn(u64) -> Pin<Box<dyn Future<Output = Resu
 /// Externally implemented function receiving an offer signal and returning an answer
 ///
 /// Returns the resulting answer signal
-pub type ReceiveOfferFn<E> = Box<dyn Fn(SignalSet) -> Pin<Box<dyn Future<Output = Result<SignalSet, E>>>>>;
+pub type ReceiveOfferFn<A, O, C, E> = Box<dyn Fn(SignalSet<O, C>) -> Pin<Box<dyn Future<Output = Result<SignalSet<A, C>, E>>>>>;
 
 /// Externally implemented function handling completion of remote signalling
 ///
@@ -241,7 +255,7 @@ impl RtcSignallingClient {
     pub async fn connect(
         addr: String,
         timeout: Option<Duration>,
-    ) -> Result<Self, ClientError> {
+    ) -> ClientResult<Self> {
         // create an empty temp request to build timeout metadata
         let mut tmp_req = Request::new(());
         tmp_req.set_timeout(timeout.unwrap_or(DEFAULT_REQUEST_DEADLINE));
@@ -263,16 +277,19 @@ impl RtcSignallingClient {
     /// Run signalling client
     ///
     /// Concurrent tasks are managed internally
-    pub async fn run<E>(
+    pub async fn run<A, O, C, E>(
         &self,
-        create_offer_fn: CreateOfferFn<E>,
-        receive_answer_fn: ReceiveAnswerFn<E>,
+        create_offer_fn: CreateOfferFn<O, C, E>,
+        receive_answer_fn: ReceiveAnswerFn<A, C, E>,
         local_sig_cplt_fn: LocalSigCpltFn<E>,
-        receive_offer_fn: ReceiveOfferFn<E>,
+        receive_offer_fn: ReceiveOfferFn<A, O, C, E>,
         remote_sig_cplt_fn: RemoteSigCpltFn<E>,
-    ) -> Result<(), ClientError>
+    ) -> ClientResult<()>
     where
-        ClientError: From<E>
+        A: serde::Serialize + serde::de::DeserializeOwned,
+        O: serde::Serialize + serde::de::DeserializeOwned,
+        C: serde::Serialize + serde::de::DeserializeOwned,
+        ClientError: From<E>,
     {
         let id = self.advertise().await?;
         let peer_listener = self.open_peer_listener(id).await?;
