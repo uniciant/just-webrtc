@@ -1,0 +1,90 @@
+syntax = "proto3";
+
+package main_pb;
+
+
+message PeerId {
+    uint64 id = 1;
+}
+enum Change {
+    PEER_CHANGE_ADD = 0;
+    PEER_CHANGE_REMOVE = 1;
+}
+message PeerChange {
+    uint64 id = 1;
+    Change change = 2;
+}
+
+message SignalOffer {
+    uint64 offerer_id = 1;
+    bytes offer = 2;
+    bytes candidates = 3;
+}
+message SignalAnswer {
+    uint64 answerer_id = 1;
+    bytes answer = 2;
+    bytes candidates = 3;
+}
+
+message AdvertiseReq {}
+message AdvertiseRsp {
+    PeerId local_peer = 1;
+}
+
+message PeerDiscoverReq {
+    PeerId local_peer = 1;
+}
+message PeerDiscoverRsp {
+    repeated PeerId remote_peers = 1;
+}
+
+message PeerListenerReq {
+    PeerId local_peer = 1;
+}
+message PeerListenerRsp {
+    repeated PeerChange peer_changes = 1;
+}
+
+message SignalOfferReq {
+    PeerId answerer_peer = 1;
+    SignalOffer offer_signal = 2;
+}
+message SignalOfferRsp {
+}
+
+message OfferListenerReq {
+    PeerId local_peer = 1;
+}
+message OfferListenerRsp {
+    SignalOffer offer_signal = 1;
+}
+
+message SignalAnswerReq {
+    PeerId offerer_peer = 1;
+    SignalAnswer answer_signal = 2;
+}
+message SignalAnswerRsp {}
+
+message AnswerListenerReq {
+    PeerId local_peer = 1;
+}
+message AnswerListenerRsp {
+    SignalAnswer answer_signal = 1;
+}
+
+service RtcSignalling {
+    // Advertise self as a peer
+    rpc Advertise(AdvertiseReq) returns (AdvertiseRsp) {}
+    // Discover all peers
+    rpc PeerDiscover(PeerDiscoverReq) returns (PeerDiscoverRsp) {}
+    // Open stream of peer discoveries
+    rpc OpenPeerListener(PeerListenerReq) returns (stream PeerListenerRsp) {}
+    // Signal an offer to a peer
+    rpc SignalOffer(SignalOfferReq) returns (SignalOfferRsp) {}
+    // Open stream, listening for offers from remote peers
+    rpc OpenOfferListener(OfferListenerReq) returns (stream OfferListenerRsp) {}
+    // Signal an answer to a peer
+    rpc SignalAnswer(SignalAnswerReq) returns (SignalAnswerRsp) {}
+    // Open stream, listening for answers from remote peers
+    rpc OpenAnswerListener(AnswerListenerReq) returns (stream AnswerListenerRsp) {}
+}

@@ -1,0 +1,45 @@
+[package]
+name = "protocol-tonic"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+log = "0.4"
+prost = "0.12.3"
+#client deps (all targets)
+thiserror = { version = "1.0", optional = true }
+anyhow = { version = "1.0", optional = true }
+bincode = { version = "1.3", optional = true }
+just-webrtc = { path = "../../", optional = true }
+futures = { version = "0.3.30", optional = true }
+
+[features]
+default = ["server", "client"]
+server = [
+    "dep:tokio",
+    "dep:tokio-stream",
+    "dep:slotmap",
+]
+client = [
+    "dep:just-webrtc",
+    "dep:bincode",
+    "dep:thiserror",
+    "dep:anyhow",
+    "dep:futures",
+]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tonic = { version = "0.11.0", default-features = false, features = ["prost", "codegen"] } # no included transport layer
+tonic-web-wasm-client = { version = "0.5.1" }    # transport layer for tonic clients over WASM
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tonic = { version = "0.11.0", default-features = false, features = ["prost", "codegen", "transport"] }  # include transport layer
+tokio-stream = { version = "0.1.14", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
+slotmap = { version = "1", optional = true }
+
+[build-dependencies]
+tonic-build = { version = "0.11.0", default-features = false, features = [
+    "prost",
+    "transport",    # transport is disabled for wasm within build script
+]}
