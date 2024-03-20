@@ -1,5 +1,5 @@
 [package]
-name = "protocol-tonic"
+name = "just-webrtc-signalling"
 version = "0.1.0"
 edition = "2021"
 
@@ -10,7 +10,8 @@ prost = "0.12.3"
 thiserror = { version = "1.0", optional = true }
 anyhow = { version = "1.0", optional = true }
 bincode = { version = "1.3", optional = true }
-just-webrtc = { path = "../../", optional = true }
+#TODO remove this cross dependency (generic SignalSet)
+just-webrtc = { path = "../just-webrtc", optional = true }
 futures = { version = "0.3.30", optional = true }
 
 [features]
