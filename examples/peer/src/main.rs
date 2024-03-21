@@ -154,7 +154,7 @@ async fn run_peer(addr: &str) -> Result<()> {
     let receive_offer_fn = Box::new(|offer_set| receive_offer(offer_set).boxed_local());
     let remote_sig_cplt_fn = Box::new(|remote_id| peer_echo_task(remote_id).boxed_local());
     // create signalling client
-    let signalling_client = RtcSignallingClient::connect(addr.to_string(), None).await?;
+    let signalling_client = RtcSignallingClient::connect(addr.to_string(), None, None, None).await?;
     // run signalling client
     signalling_client.run(
         create_offer_fn,
@@ -168,27 +168,26 @@ async fn run_peer(addr: &str) -> Result<()> {
 
 #[cfg(target_arch = "wasm32")]
 // Run me via `trunk serve`!
-fn main() -> Result<()> {
+fn main() {
     use log::error;
-    use just_webrtc_signalling::TONiC_WEB_SERVER_ADDR;
+    use just_webrtc_signalling::DEFAULT_WEB_SERVER_ADDR;
 
-    console_log::init_with_level(log::Level::Debug)?;
+    console_log::init_with_level(log::Level::Debug).unwrap();
     info!("starting web peer!");
-    // run locally detached
+    // run locally, detached
     wasm_bindgen_futures::spawn_local(async {
-        if let Err(e) = run_peer(TONIC_WEB_SERVER_ADDR).await {
+        if let Err(e) = run_peer(DEFAULT_WEB_SERVER_ADDR).await {
             error!("{e}")
         }
     });
-    Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::main]
 async fn main() -> Result<()> {
-    use just_webrtc_signalling::TONIC_NATIVE_SERVER_ADDR;
+    use just_webrtc_signalling::DEFAULT_NATIVE_SERVER_ADDR;
 
     pretty_env_logger::try_init()?;
-    info!("starting local peer!");
-    run_peer(TONIC_NATIVE_SERVER_ADDR).await
+    info!("starting native peer!");
+    run_peer(DEFAULT_NATIVE_SERVER_ADDR).await
 }
