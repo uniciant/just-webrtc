@@ -268,22 +268,19 @@ impl RtcSignallingClient {
         // create the client
         #[cfg(not(target_arch = "wasm32"))]
         let client = {
-            let (tls_config, addr) = if domain.is_some() && tls_ca_pem.is_some() {
+            let endpoint = if domain.is_some() && tls_ca_pem.is_some() {
                 let ca_certificate = tonic::transport::Certificate::from_pem(tls_ca_pem.unwrap());
                 let tls_config = tonic::transport::ClientTlsConfig::new()
                     .domain_name(domain.unwrap())
                     .ca_certificate(ca_certificate);
                 let addr = format!("https://{addr}");
-                (tls_config, addr)
+                tonic::transport::Channel::from_shared(addr).map_err(|_e| ClientError::InvalidUrl)?
+                    .tls_config(tls_config)?
             } else {
-                let tls_config = tonic::transport::ClientTlsConfig::new();
                 let addr = format!("http://{addr}");
-                (tls_config, addr)
+                tonic::transport::Channel::from_shared(addr).map_err(|_e| ClientError::InvalidUrl)?
             };
-            let channel = tonic::transport::Channel::from_shared(addr).map_err(|_e| ClientError::InvalidUrl)?
-                .tls_config(tls_config)?
-                .connect()
-                .await?;
+            let channel = endpoint.connect().await?;
             crate::pb::rtc_signalling_client::RtcSignallingClient::new(channel)
         };
         #[cfg(target_arch = "wasm32")]
@@ -338,6 +335,7 @@ impl RtcSignallingClient {
         let mut remote_sig_cplt_futs = FuturesUnordered::new();
         // init empty list of discovered peers
         let mut discovered_peers: HashSet<u64> = HashSet::new();
+        let mut first_discovery = true;
         // concurrent signalling loop
         loop {
             select! {
@@ -349,8 +347,6 @@ impl RtcSignallingClient {
                     debug!("peer listener task completed ({id:#016x})");
                     // reset peer listener future
                     peer_listener_fut.set(peer_listener_task(listener).fuse());
-                    // save initial state of discovered peers list
-                    let first_discovery = discovered_peers.is_empty();
                     // apply peer changes to discovered peers map
                     for peer_change in peer_changes.iter() {
                         match peer_change.change() {
@@ -372,6 +368,7 @@ impl RtcSignallingClient {
                     }
                     // if this is the first discovery, queue creation of offers for each remote peer (creates local peer connections)
                     if first_discovery {
+                        first_discovery = false;
                         let create_offer_tasks = peer_changes.iter()
                             .filter_map(|peer_change|
                                 if peer_change.change() == Change::PeerChangeAdd {
