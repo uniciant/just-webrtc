@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::{atomic::AtomicU64, RwLock}};
+use std::{collections::HashMap, net::SocketAddr, sync::{atomic::AtomicU64, RwLock}, time::Duration};
 
 use log::{debug, info};
 
@@ -7,10 +7,10 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tonic::{Request, Response, Result, Status};
 
 use crate::pb::{
-    rtc_signalling_server::RtcSignalling, AdvertiseReq, AdvertiseRsp, AnswerListenerReq, AnswerListenerRsp, Change, OfferListenerReq, OfferListenerRsp, PeerChange, PeerDiscoverReq, PeerDiscoverRsp, PeerId, PeerListenerReq, PeerListenerRsp, SignalAnswerReq, SignalAnswerRsp, SignalOfferReq, SignalOfferRsp
+    rtc_signalling_server::{RtcSignalling, RtcSignallingServer}, AdvertiseReq, AdvertiseRsp, AnswerListenerReq, AnswerListenerRsp, Change, OfferListenerReq, OfferListenerRsp, PeerChange, PeerDiscoverReq, PeerDiscoverRsp, PeerId, PeerListenerReq, PeerListenerRsp, SignalAnswerReq, SignalAnswerRsp, SignalOfferReq, SignalOfferRsp
 };
 
-const GENERATOR: AtomicU64 = AtomicU64::new(0);
+static GENERATOR: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Default)]
 struct Listeners {
@@ -21,6 +21,12 @@ struct Listeners {
 
 pub struct RtcSignallingService {
     peers: RwLock<HashMap<u64, Listeners>>,
+}
+
+impl RtcSignallingService {
+    pub fn new_svc() -> RtcSignallingServer<RtcSignallingService> {
+        RtcSignallingServer::new(RtcSignallingService { peers: RwLock::new(HashMap::new()) })
+    }
 }
 
 #[tonic::async_trait]
@@ -46,7 +52,7 @@ impl RtcSignalling for RtcSignallingService {
         for (_peer_id, listeners) in peers.iter() {
             let peer_listener = listeners.peer_listener.read().unwrap();
             if let Some(tx) = peer_listener.as_ref() {
-                if let Err(_) = tx.send(Ok(PeerListenerRsp { peer_changes: vec![peer_change.clone()] })) {
+                if tx.send(Ok(PeerListenerRsp { peer_changes: vec![peer_change.clone()] })).is_err() {
                     return Err(Status::internal("peer listener receiver was dropped! peer unavailable!"))
                 }
             }
@@ -90,7 +96,7 @@ impl RtcSignalling for RtcSignallingService {
         // create peer listener
         let peer = peers.get(&local_peer.id).ok_or(Status::failed_precondition("listener peer not advertised!"))?;
         let mut peer_listener = peer.peer_listener.write().unwrap();
-        if let Some(_tx) = peer_listener.replace(tx) {
+        if peer_listener.replace(tx).is_some() {
             return Err(Status::already_exists("peer listener already exists!"));
         }
         // return stream
@@ -111,7 +117,7 @@ impl RtcSignalling for RtcSignallingService {
         let peer = peers.get(&answerer_peer.id).ok_or(Status::failed_precondition("answerer peer not advertised!"))?;
         let offer_listener = peer.offer_listener.read().unwrap();
         if let Some(tx) = offer_listener.as_ref() {
-            if let Err(_) = tx.send(Ok(OfferListenerRsp { offer_signal: Some(offer_signal) })) {
+            if tx.send(Ok(OfferListenerRsp { offer_signal: Some(offer_signal) })).is_err() {
                 return Err(Status::failed_precondition("offer listener receiver was dropped! peer unavailable!"));
             }
         } else {
@@ -134,7 +140,7 @@ impl RtcSignalling for RtcSignallingService {
         let peers = self.peers.read().unwrap();
         let peer = peers.get(&local_peer.id).ok_or(Status::failed_precondition("listener peer not advertised!"))?;
         let mut offer_listener = peer.offer_listener.write().unwrap();
-        if let Some(_tx) = offer_listener.replace(tx) {
+        if offer_listener.replace(tx).is_some() {
             return Err(Status::already_exists("offer listener already exists!"))
         }
         // return stream
@@ -155,8 +161,7 @@ impl RtcSignalling for RtcSignallingService {
         let peer = peers.get(&offerer_peer.id).ok_or(Status::failed_precondition("answerer peer not advertised!"))?;
         let answer_listener = peer.answer_listener.read().unwrap();
         if let Some(tx) = answer_listener.as_ref() {
-            if let Err(_) = tx.send(Ok(AnswerListenerRsp { answer_signal: Some(answer_signal) })) {
-
+            if tx.send(Ok(AnswerListenerRsp { answer_signal: Some(answer_signal) })).is_err() {
                 return Err(Status::internal("answer listener receiver was dropped! peer unavailable!"));
             }
         } else {
@@ -186,4 +191,88 @@ impl RtcSignalling for RtcSignallingService {
         Ok(Response::new(UnboundedReceiverStream::new(rx)))
     }
     type OpenAnswerListenerStream = UnboundedReceiverStream<Result<AnswerListenerRsp>>;
+}
+
+/// Start service for native clients
+pub async fn serve(
+    addr: SocketAddr,
+    http2_keepalive_interval: Option<Duration>,
+    http2_keepalive_timeout: Option<Duration>,
+    tls_pem: Option<(String, String)>,
+) -> Result<(), tonic::transport::Error> {
+    let rtc_signalling_svc = RtcSignallingService::new_svc();
+    let builder = tonic::transport::Server::builder()
+        .http2_keepalive_interval(http2_keepalive_interval)
+        .http2_keepalive_timeout(http2_keepalive_timeout);
+    // configure TLS
+    let mut builder = if let Some((cert_pem, key_pem)) = tls_pem {
+        let server_identity = tonic::transport::Identity::from_pem(cert_pem, key_pem);
+        let tls_config = tonic::transport::ServerTlsConfig::new()
+            .identity(server_identity);
+        builder.tls_config(tls_config)?
+    } else {
+        builder
+    };
+    // start server
+    info!("Running native gRPC signalling server ({addr})");
+    builder
+        .add_service(rtc_signalling_svc)
+        .serve(addr).await?;
+    Ok(())
+}
+
+#[cfg(feature = "server-web")]
+/// Start service for web clients
+pub async fn serve_web(
+    addr: SocketAddr,
+    http2_keepalive_interval: Option<Duration>,
+    http2_keepalive_timeout: Option<Duration>,
+    tls_pem: Option<(String, String)>,
+) -> Result<(), tonic::transport::Error> {
+    let rtc_signalling_svc = RtcSignallingService::new_svc();
+    // CORS layer control
+    const DEFAULT_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+    const DEFAULT_EXPOSED_HEADERS: [&str; 3] =
+        ["grpc-status", "grpc-message", "grpc-status-details-bin"];
+    const DEFAULT_ALLOW_HEADERS: [&str; 5] =
+        ["x-grpc-web", "content-type", "x-user-agent", "grpc-timeout", "neshi-client-id"];
+    let cors = tower_http::cors::CorsLayer::new()
+        .allow_origin(tower_http::cors::AllowOrigin::mirror_request())
+        .allow_credentials(true)
+        .max_age(DEFAULT_MAX_AGE)
+        .expose_headers(
+            DEFAULT_EXPOSED_HEADERS
+                .iter()
+                .cloned()
+                .map(http::HeaderName::from_static)
+                .collect::<Vec<http::HeaderName>>(),
+        )
+        .allow_headers(
+            DEFAULT_ALLOW_HEADERS
+                .iter()
+                .cloned()
+                .map(http::HeaderName::from_static)
+                .collect::<Vec<http::HeaderName>>(),
+        );
+    let builder = tonic::transport::Server::builder()
+        .accept_http1(tls_pem.is_none())
+        .layer(cors)
+        .layer(tonic_web::GrpcWebLayer::new())
+        .http2_keepalive_interval(http2_keepalive_interval)
+        .http2_keepalive_timeout(http2_keepalive_timeout);
+    // configure TLS
+    let mut builder = if let Some((cert_pem, key_pem)) = tls_pem {
+        let server_identity = tonic::transport::Identity::from_pem(cert_pem, key_pem);
+        let tls_config = tonic::transport::ServerTlsConfig::new()
+            .identity(server_identity);
+        builder.tls_config(tls_config)?
+    } else {
+        builder
+    };
+    // start server
+    info!("Running web gRPC signalling server ({addr})");
+    builder
+        .add_service(rtc_signalling_svc)
+        .serve(addr).await?;
+    Ok(())
 }

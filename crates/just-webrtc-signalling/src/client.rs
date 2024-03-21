@@ -20,6 +20,8 @@ pub enum ClientError {
     ListenerClosed,
     #[error("Listener unavailable!")]
     ListenerUnavailable,
+    #[error("Invalid URL")]
+    InvalidUrl,
     #[error(transparent)]
     TonicStatus(#[from] tonic::Status),
     #[cfg(not(target_arch = "wasm32"))]
@@ -187,7 +189,7 @@ impl RtcSignallingClient {
         );
         let _response = {
             let mut client = self.inner.lock().await;
-            client.signal_answer(request).await?;
+            client.signal_answer(request).await?
         };
         Ok(remote_id)
     }
@@ -217,7 +219,7 @@ impl RtcSignallingClient {
         // queue signalling of offer
         let _response = {
             let mut client = self.inner.lock().await;
-            client.signal_offer(request).await?;
+            client.signal_offer(request).await?
         };
         Ok(remote_id)
     }
@@ -255,6 +257,8 @@ impl RtcSignallingClient {
     pub async fn connect(
         addr: String,
         timeout: Option<Duration>,
+        domain: Option<String>,
+        tls_ca_pem: Option<String>,
     ) -> ClientResult<Self> {
         // create an empty temp request to build timeout metadata
         let mut tmp_req = Request::new(());
@@ -263,9 +267,33 @@ impl RtcSignallingClient {
         let (grpc_metadata, _, _) = tmp_req.into_parts();
         // create the client
         #[cfg(not(target_arch = "wasm32"))]
-        let client = crate::pb::rtc_signalling_client::RtcSignallingClient::<tonic::transport::Channel>::connect(addr).await?;
+        let client = {
+            let (tls_config, addr) = if domain.is_some() && tls_ca_pem.is_some() {
+                let ca_certificate = tonic::transport::Certificate::from_pem(tls_ca_pem.unwrap());
+                let tls_config = tonic::transport::ClientTlsConfig::new()
+                    .domain_name(domain.unwrap())
+                    .ca_certificate(ca_certificate);
+                let addr = format!("https://{addr}");
+                (tls_config, addr)
+            } else {
+                let tls_config = tonic::transport::ClientTlsConfig::new();
+                let addr = format!("http://{addr}");
+                (tls_config, addr)
+            };
+            let channel = tonic::transport::Channel::from_shared(addr).map_err(|_e| ClientError::InvalidUrl)?
+                .tls_config(tls_config)?
+                .connect()
+                .await?;
+            crate::pb::rtc_signalling_client::RtcSignallingClient::new(channel)
+        };
         #[cfg(target_arch = "wasm32")]
-        let client = crate::pb::rtc_signalling_client::RtcSignallingClient::<tonic_web_wasm_client::Client>::new(addr);
+        let client = {
+            if domain.is_some() || tls_ca_pem.is_some() {
+                warn!("Signalling client domain/tls settings are ignored! Client TLS is handled by the browser.");
+            }
+            let client = tonic_web_wasm_client::new(addr);
+            crate::pb::rtc_signalling_client::RtcSignallingClient::new(client)
+        };
         // advertise local peer
         // return connected client
         Ok(Self {
