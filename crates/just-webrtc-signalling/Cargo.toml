@@ -14,7 +14,7 @@ futures = { version = "0.3.30", optional = true }
 serde = { version = "1.0", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-tonic = { version = "0.11.0", default-features = false, features = ["prost", "codegen", "tls"] } # no included transport layer
+tonic = { version = "0.11.0", default-features = false, features = ["prost", "codegen"] } # no included transport layer
 tonic-web-wasm-client = { version = "0.5.1" }    # transport layer for tonic clients over WASM
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -22,6 +22,7 @@ tonic = { version = "0.11.0", default-features = false, features = ["prost", "co
 tokio-stream = { version = "0.1.14", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
 slotmap = { version = "1", optional = true }
+async-stream = { version = "0.3.5", optional = true }
 pretty_env_logger = { version = "0.5", optional = true }
 tower-http = { version = "0.4", features = ["cors"], optional = true }
 http = { version = "0.2.12", optional = true }
@@ -37,8 +38,10 @@ server = [
     "dep:tokio-stream",
     "dep:slotmap",
     "dep:pretty_env_logger",
+    "dep:async-stream",
 ]
 server-web = [
+    "server",
     "dep:tower-http",
     "dep:http",
     "dep:tonic-web",
