@@ -1,6 +1,6 @@
-use std::{collections::HashSet, pin::Pin, time::Duration, future::Future};
+use std::{collections::HashSet, future::Future, pin::Pin, time::Duration};
 
-use futures::{lock::Mutex, pin_mut, select, stream::FuturesUnordered, FutureExt, StreamExt};
+use futures::{pin_mut, select, stream::FuturesUnordered, FutureExt, StreamExt};
 use log::{debug, info, trace, warn};
 use tonic::{metadata::MetadataMap, Extensions, Request, Streaming};
 
@@ -98,91 +98,76 @@ where
 pub struct RtcSignallingClient {
     grpc_metadata: MetadataMap,
     #[cfg(not(target_arch = "wasm32"))]
-    inner: Mutex<crate::pb::rtc_signalling_client::RtcSignallingClient<tonic::transport::Channel>>,
+    inner: crate::pb::rtc_signalling_client::RtcSignallingClient<tonic::transport::Channel>,
     #[cfg(target_arch = "wasm32")]
-    inner: Mutex<crate::pb::rtc_signalling_client::RtcSignallingClient<tonic_web_wasm_client::Client>>,
+    inner: crate::pb::rtc_signalling_client::RtcSignallingClient<tonic_web_wasm_client::Client>,
 }
 
 /// Private helper methods
 impl RtcSignallingClient {
     /// Private advertise helper method
-    async fn advertise(&self) -> Result<u64, tonic::Status> {
+    async fn advertise(&mut self) -> Result<u64, tonic::Status> {
         let request = Request::from_parts(self.grpc_metadata.clone(), Extensions::default(), AdvertiseReq {});
         debug!("sending advertise request");
-        let response = {
-            let mut client = self.inner.lock().await;
-            client.advertise(request).await?
-        };
+        let response = self.inner.advertise(request).await?;
         let local_id = response.into_inner().local_peer.unwrap().id;
         debug!("received advertise response ({local_id:#016x})");
         Ok(local_id)
     }
     /// Private peer discover helper method
-    async fn _peer_discover(&self, id: u64) -> Result<Vec<u64>, tonic::Status> {
+    async fn _peer_discover(&mut self, id: u64) -> Result<Vec<u64>, tonic::Status> {
         let request = Request::from_parts(
             self.grpc_metadata.clone(),
             Extensions::default(),
             PeerDiscoverReq { local_peer: Some(PeerId { id }) }
         );
         debug!("sending peer discover request ({id:#016x})");
-        let response = {
-            let mut client = self.inner.lock().await;
-            client.peer_discover(request).await?
-        };
+        let response = self.inner.peer_discover(request).await?;
         debug!("received peer discover response ({id:#016x})");
         Ok(response.into_inner().remote_peers.into_iter().map(|peer| peer.id).collect())
     }
     /// Private open peer listener helper method
-    async fn open_peer_listener(&self, id: u64) -> Result<Streaming<PeerListenerRsp>, tonic::Status> {
+    async fn open_peer_listener(&mut self, id: u64) -> Result<Streaming<PeerListenerRsp>, tonic::Status> {
         let request = Request::from_parts(
             self.grpc_metadata.clone(),
             Extensions::default(),
             PeerListenerReq { local_peer: Some(PeerId { id }) }
         );
         debug!("sending open peer listener request ({id:#016x})");
-        let response = {
-            let mut client = self.inner.lock().await;
-            client.open_peer_listener(request).await?
-        };
+        let response = self.inner.open_peer_listener(request).await?;
         debug!("received open peer listener response ({id:#016x})");
         let peer_listener = response.into_inner();
         Ok(peer_listener)
     }
     /// Private open offer listener helper method
-    async fn open_offer_listener(&self, id: u64) -> Result<Streaming<OfferListenerRsp>, tonic::Status> {
+    async fn open_offer_listener(&mut self, id: u64) -> Result<Streaming<OfferListenerRsp>, tonic::Status> {
         let request = Request::from_parts(
             self.grpc_metadata.clone(),
             Extensions::default(),
             OfferListenerReq { local_peer: Some(PeerId { id }) }
         );
         debug!("sending open offer listener request ({id:#016x})");
-        let response = {
-            let mut client = self.inner.lock().await;
-            client.open_offer_listener(request).await?
-        };
+        let response = self.inner.open_offer_listener(request).await?;
         debug!("received open offer listener response ({id:#016x})");
         let offer_listener = response.into_inner();
         Ok(offer_listener)
     }
     /// Private open answer listener helper method
-    async fn open_answer_listener(&self, id: u64) -> Result<Streaming<AnswerListenerRsp>, tonic::Status> {
+    async fn open_answer_listener(&mut self, id: u64) -> Result<Streaming<AnswerListenerRsp>, tonic::Status> {
         let request = Request::from_parts(
             self.grpc_metadata.clone(),
             Extensions::default(),
             AnswerListenerReq { local_peer: Some(PeerId { id }) }
         );
         debug!("sending open answer listener request ({id:#016x})");
-        let response = {
-            let mut client = self.inner.lock().await;
-            client.open_answer_listener(request).await?
-        };
+        let response = self.inner.open_answer_listener(request).await?;
         debug!("received open answer listener response ({id:#016x})");
         let answer_listener = response.into_inner();
         Ok(answer_listener)
     }
     /// Private signal answer helper method
     async fn signal_answer<A, C>(
-        &self,
+        &mut self,
         id: u64,
         remote_id: u64,
         answer: A,
@@ -204,16 +189,13 @@ impl RtcSignallingClient {
             }
         );
         debug!("sending signal answer request ({id:#016x})");
-        let _response = {
-            let mut client = self.inner.lock().await;
-            client.signal_answer(request).await?
-        };
+        let _response = self.inner.signal_answer(request).await?;
         debug!("received signal answer response ({id:#016x})");
         Ok(remote_id)
     }
     /// Private signal offer helper method
     async fn signal_offer<O, C>(
-        &self,
+        &mut self,
         id: u64,
         remote_id: u64,
         offer: O,
@@ -236,10 +218,7 @@ impl RtcSignallingClient {
         );
         // queue signalling of offer
         debug!("sending signal offer request ({id:#016x})");
-        let _response = {
-            let mut client = self.inner.lock().await;
-            client.signal_offer(request).await?
-        };
+        let _response = self.inner.signal_offer(request).await?;
         debug!("received signal offer response ({id:#016x})");
         Ok(remote_id)
     }
@@ -317,7 +296,7 @@ impl RtcSignallingClient {
         // return connected client
         Ok(Self {
             grpc_metadata,
-            inner: Mutex::new(client),
+            inner: client,
         })
     }
 
@@ -325,7 +304,7 @@ impl RtcSignallingClient {
     ///
     /// Concurrent tasks are managed internally
     pub async fn run<A, O, C, E>(
-        &self,
+        &mut self,
         create_offer_fn: CreateOfferFn<O, C, E>,
         receive_answer_fn: ReceiveAnswerFn<A, C, E>,
         local_sig_cplt_fn: LocalSigCpltFn<E>,
@@ -349,11 +328,9 @@ impl RtcSignallingClient {
         pin_mut!(peer_listener_fut, offer_listener_fut, answer_listener_fut);
         // create empty sets of futures to run later
         let mut create_offer_futs = FuturesUnordered::new();
-        let mut signal_offer_futs = FuturesUnordered::new();
         let mut receive_answer_futs = FuturesUnordered::new();
         let mut local_sig_cplt_futs = FuturesUnordered::new();
         let mut receive_offer_futs = FuturesUnordered::new();
-        let mut signal_answer_futs = FuturesUnordered::new();
         let mut remote_sig_cplt_futs = FuturesUnordered::new();
         // init empty list of discovered peers
         let mut discovered_peers: HashSet<u64> = HashSet::new();
@@ -406,16 +383,13 @@ impl RtcSignallingClient {
                     }
                 },
                 // Local peer connections generate offers...
+                // Offers are signalled to the remote peers...
                 result = create_offer_futs.select_next_some() => {
                     debug!("create offer task completed ({id:#016x})");
                     let offer_set = result?;
-                    // queue signalling of offer
-                    signal_offer_futs.push(self.signal_offer(id, offer_set.remote_id, offer_set.desc, offer_set.candidates))
-                },
-                // Offers are signalled to the remote peers...
-                result = signal_offer_futs.select_next_some() => {
-                    let remote_id = result?;
-                    debug!("signal offer task completed ({id:#016x})");
+                    // perform signalling of offer
+                    let remote_id = self.signal_offer(id, offer_set.remote_id, offer_set.desc, offer_set.candidates).await?;
+                    debug!("signalling of offer completed ({id:#016x})");
                     info!("offer signalled to peer. (remote peer: {remote_id:#016x})");
                     // do nothing, local signalling chain continues when answer listener receives an answer
                 },
@@ -455,18 +429,15 @@ impl RtcSignallingClient {
                     receive_offer_futs.push(receive_offer_fn(offer_set));
                 },
                 // This offer is used to create a remote peer connection and generate an answer...
-                result = receive_offer_futs.select_next_some() => {
-                    debug!("receive offer task completed ({id:#016x})");
-                    let answer_set = result?;
-                    // queue signalling of answer
-                    signal_answer_futs.push(self.signal_answer(id, answer_set.remote_id, answer_set.desc, answer_set.candidates));
-                },
                 // The answer is sent to the remote offerer,
                 // Completing a "remote" signalling chain.
                 // And starting a remote signalling chain complete handler.
-                result = signal_answer_futs.select_next_some() => {
-                    let remote_id = result?;
-                    debug!("signal answer task completed ({id:#016x})");
+                result = receive_offer_futs.select_next_some() => {
+                    debug!("receive offer task completed ({id:#016x})");
+                    let answer_set = result?;
+                    // perform signalling of answer
+                    let remote_id = self.signal_answer(id, answer_set.remote_id, answer_set.desc, answer_set.candidates).await?;
+                    debug!("signalling of answer completed ({id:#016x})");
                     trace!("remote signalling chain complete. (remote peer: {remote_id:#016x})");
                     // queue remote signalling complete handler
                     remote_sig_cplt_futs.push(remote_sig_cplt_fn(remote_id));
