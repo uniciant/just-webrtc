@@ -71,7 +71,7 @@ async fn peer_echo_task(remote_id: u64) -> Result<u64> {
 
 async fn create_offer(remote_id: u64) -> Result<SignalSet> {
     let channel_options = vec![
-        (format!("rtc_channel_to_{:#x}_", remote_id), DataChannelOptions::default())
+        (format!("rtc_channel_to_{remote_id:#016x}_"), DataChannelOptions::default())
     ];
     let mut local_peer_connection = PeerConnectionBuilder::new()
         .with_channel_options(channel_options)?
@@ -154,7 +154,7 @@ async fn run_peer(addr: &str) -> Result<()> {
     let receive_offer_fn = Box::new(|offer_set| receive_offer(offer_set).boxed_local());
     let remote_sig_cplt_fn = Box::new(|remote_id| peer_echo_task(remote_id).boxed_local());
     // create signalling client
-    let signalling_client = RtcSignallingClient::connect(addr.to_string(), None, None, None).await?;
+    let signalling_client = RtcSignallingClient::connect(addr.to_string(), None, false, None, None).await?;
     // run signalling client
     signalling_client.run(
         create_offer_fn,
@@ -172,7 +172,7 @@ fn main() {
     use log::error;
     use just_webrtc_signalling::DEFAULT_WEB_SERVER_ADDR;
 
-    console_log::init_with_level(log::Level::Debug).unwrap();
+    console_log::init_with_level(log::Level::Trace).unwrap();
     info!("starting web peer!");
     // run locally, detached
     wasm_bindgen_futures::spawn_local(async {
@@ -183,7 +183,7 @@ fn main() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     use just_webrtc_signalling::DEFAULT_NATIVE_SERVER_ADDR;
 

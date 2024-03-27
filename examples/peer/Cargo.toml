@@ -7,7 +7,6 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
-pretty_env_logger = "0.5"
 just-webrtc = { path = "../../crates/just-webrtc" }
 just-webrtc-signalling = { path = "../../crates/just-webrtc-signalling", default-features = false, features = ["client"] }
 log = "0.4"
