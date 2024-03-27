@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use log::{debug, error, trace};
-use tokio::sync::{mpsc::UnboundedSender, watch};
+use tokio::sync::{mpsc::{error::TryRecvError, UnboundedReceiver, UnboundedSender}, watch};
 use webrtc::{
     api::APIBuilder,
     data_channel::{data_channel_init::RTCDataChannelInit, data_channel_message::DataChannelMessage, RTCDataChannel},
@@ -10,11 +10,61 @@ use webrtc::{
     peer_connection::{configuration::RTCConfiguration, peer_connection_state::RTCPeerConnectionState, policy::{bundle_policy::RTCBundlePolicy, ice_transport_policy::RTCIceTransportPolicy, rtcp_mux_policy::RTCRtcpMuxPolicy}, sdp::{sdp_type::RTCSdpType, session_description::RTCSessionDescription}, RTCPeerConnection},
 };
 
-use crate::{types::{BundlePolicy, ICECandidate, ICECredentialType, ICEServer, ICETransportPolicy, PeerConfiguration, PeerConnectionState, RTCPMuxPolicy, SDPType, SessionDescription}, Channel, DataChannelOptions, GenericPeerConnection, PeerConnectionBuilder};
+use crate::{types::{BundlePolicy, ICECandidate, ICECredentialType, ICEServer, ICETransportPolicy, PeerConfiguration, PeerConnectionState, RTCPMuxPolicy, SDPType, SessionDescription}, DataChannelExt, DataChannelOptions, PeerConnectionBuilder, PeerConnectionExt};
 use super::Platform;
 
 pub struct Native {}
 impl Platform for Native {}
+
+pub struct Channel {
+    inner: Arc<RTCDataChannel>,
+    ready_state_rx: watch::Receiver<bool>,
+    rx: UnboundedReceiver<Bytes>,
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum NativeError {
+    #[error(transparent)]
+    MpscTryRecvError(#[from] TryRecvError),
+    #[error(transparent)]
+    WatchRecvError(#[from] watch::error::RecvError),
+    #[error(transparent)]
+    WebRtcError(#[from] webrtc::Error),
+}
+
+impl DataChannelExt<NativeError> for Channel {
+    async fn wait_ready(&mut self) -> Result<(), NativeError> {
+        let _ = self.ready_state_rx.wait_for(|s| s == &true).await?;
+        Ok(())
+    }
+
+    async fn receive(&mut self) -> Option<Bytes> {
+        self.rx.recv().await
+    }
+
+    async fn send(&self, data: &Bytes) -> Result<usize, NativeError> {
+        let u = self.inner.send(data).await?;
+        Ok(u)
+    }
+
+    fn try_receive(&mut self) -> Result<Bytes, NativeError> {
+        let b = self.rx.try_recv()?;
+        Ok(b)
+    }
+
+    fn try_send(&self, _data: &Bytes) -> Result<usize, NativeError> {
+        unimplemented!();
+    }
+
+    fn id(&self) -> u16 {
+        self.inner.id()
+    }
+
+    fn label(&self) -> String {
+        self.inner.label().to_string()
+    }
+}
+
 
 fn handle_peer_connection_state_change(
     state: RTCPeerConnectionState,
@@ -32,7 +82,7 @@ fn handle_peer_connection_state_change(
 
 fn handle_data_channel(
     channel: Arc<RTCDataChannel>,
-    channels_tx: &UnboundedSender<Channel<Arc<RTCDataChannel>>>,
+    channels_tx: &UnboundedSender<Channel>,
 ) {
     let label = channel.label().to_string();
     let id = channel.id();
@@ -63,6 +113,7 @@ fn handle_data_channel(
 
     // push channel & receiver to list
     let channel = Channel { inner: channel, rx, ready_state_rx };
+
     if let Err(e) = channels_tx.send(channel) {
         error!("could not send data channel! ({e})")
     }
@@ -128,37 +179,59 @@ fn handle_ice_candidate(
     }
 }
 
-impl Channel<Arc<RTCDataChannel>> {
-    pub fn id(&self) -> u16 {
-        self.inner.id()
-    }
-
-    pub fn label(&self) -> String {
-        self.inner.label().to_string()
-    }
-
-    pub async fn send(&self, data: &Bytes) -> Result<usize, webrtc::Error> {
-        self.inner.send(data).await
-    }
+pub struct PeerConnection {
+    is_offerer: bool,
+    inner: RTCPeerConnection,
+    peer_connection_state_rx: watch::Receiver<PeerConnectionState>,
+    channels_rx: UnboundedReceiver<Channel>,
+    candidate_rx: UnboundedReceiver<Option<ICECandidate>>,
 }
 
-pub type PeerConnection = GenericPeerConnection<Arc<RTCPeerConnection>, Arc<RTCDataChannel>>;
-
-impl PeerConnection {
-    pub async fn get_local_description(&self) -> Option<SessionDescription> {
-        self.connection.local_description().await.map(|desc| desc.into())
+impl PeerConnectionExt<Channel, NativeError> for PeerConnection {
+    async fn wait_peer_connected(&mut self) -> Result<(), NativeError> {
+        let _ = self.peer_connection_state_rx.wait_for(|s| s == &PeerConnectionState::Connected).await?;
+        Ok(())
     }
 
-    pub async fn add_ice_candidates(&self, remote_candidates: Vec<ICECandidate>) -> Result<(), webrtc::Error> {
+    async fn receive_channel(&mut self) -> Option<Channel> {
+        self.channels_rx.recv().await
+    }
+
+    /// Collect all ICE candidates for the current negotiation
+    async fn collect_ice_candidates(&mut self) -> Vec<ICECandidate> {
+        let mut candidate_inits = vec![];
+        loop {
+            match self.candidate_rx.recv().await {
+                Some(Some(candidate_init)) => candidate_inits.push(candidate_init),
+                _ => return candidate_inits,
+            }
+        }
+    }
+
+    async fn get_local_description(&self) -> Option<SessionDescription> {
+        self.inner.local_description().await.map(|desc| desc.into())
+    }
+
+    async fn add_ice_candidates(&self, remote_candidates: Vec<ICECandidate>) -> Result<(), NativeError> {
         // add remote ICE candidates
         for candidate in remote_candidates {
-            self.connection.add_ice_candidate(candidate.into()).await?;
+            self.inner.add_ice_candidate(candidate.into()).await?;
         }
         Ok(())
     }
 
-    pub async fn set_remote_description(&self, remote_answer: SessionDescription) -> Result<(), webrtc::Error> {
-        self.connection.set_remote_description(remote_answer.try_into()?).await
+    async fn set_remote_description(&self, remote_answer: SessionDescription) -> Result<(), NativeError> {
+        self.inner.set_remote_description(remote_answer.try_into()?).await?;
+        Ok(())
+    }
+
+    fn is_offerer(&self) -> bool {
+        self.is_offerer
+    }
+
+    fn try_receive_channel(&mut self) -> Result<Channel, NativeError> {
+        let c = self.channels_rx.try_recv()?;
+        Ok(c)
     }
 }
 
@@ -167,11 +240,11 @@ impl PeerConnectionBuilder<Native> {
         // create new connection from the api and config
         let api = APIBuilder::default().build();
 
-        let connection: Arc<RTCPeerConnection> = Arc::new(api.new_peer_connection(self.config.clone().into()).await?);
+        let connection: RTCPeerConnection = api.new_peer_connection(self.config.clone().into()).await?;
 
         // create mpsc channels for passing info to/from handlers
         let (candidate_tx, candidate_rx) = tokio::sync::mpsc::unbounded_channel::<Option<ICECandidate>>();
-        let (channels_tx, channels_rx) = tokio::sync::mpsc::unbounded_channel::<Channel<Arc<RTCDataChannel>>>();
+        let (channels_tx, channels_rx) = tokio::sync::mpsc::unbounded_channel::<Channel>();
         let (peer_connection_state_tx, peer_connection_state_rx) = tokio::sync::watch::channel(PeerConnectionState::New);
 
         // register state change handler
@@ -220,7 +293,7 @@ impl PeerConnectionBuilder<Native> {
         // sets the local SessionDescription (offer/answer) and start the UDP listeners
         connection.set_local_description(desc).await?;
 
-        Ok(PeerConnection { is_offerer, connection, peer_connection_state_rx, channels_rx, candidate_rx })
+        Ok(PeerConnection { is_offerer, inner: connection, peer_connection_state_rx, channels_rx, candidate_rx })
     }
 }
 
