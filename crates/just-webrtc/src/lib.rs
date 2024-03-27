@@ -7,18 +7,19 @@ pub mod platform;
 pub mod types;
 
 use types::{DataChannelOptions, ICECandidate, ICEServer, PeerConfiguration, SessionDescription};
+use platform::{Error, Channel, PeerConnection};
 
 #[cfg_attr(not(target_arch = "wasm32"), trait_variant::make(Send))]
-pub trait DataChannelExt<E> {
-    async fn wait_ready(&mut self) -> Result<(), E>;
+pub trait DataChannelExt {
+    async fn wait_ready(&mut self) -> Result<(), Error>;
 
     async fn receive(&mut self) -> Option<Bytes>;
 
-    async fn send(&self, data: &Bytes) -> Result<usize, E>;
+    async fn send(&self, data: &Bytes) -> Result<usize, Error>;
 
-    fn try_receive(&mut self) -> Result<Bytes, E>;
+    fn try_receive(&mut self) -> Result<Bytes, Error>;
 
-    fn try_send(&self, data: &Bytes) -> Result<usize, E>;
+    fn try_send(&self, data: &Bytes) -> Result<usize, Error>;
 
     fn id(&self) -> u16;
 
@@ -26,22 +27,22 @@ pub trait DataChannelExt<E> {
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), trait_variant::make(Send))]
-pub trait PeerConnectionExt<C, E> {
-    async fn wait_peer_connected(&mut self) -> Result<(), E>;
+pub trait PeerConnectionExt {
+    async fn wait_peer_connected(&mut self) -> Result<(), Error>;
 
-    async fn receive_channel(&mut self) -> Option<C>;
+    async fn receive_channel(&mut self) -> Option<Channel>;
 
     async fn collect_ice_candidates(&mut self) -> Vec<ICECandidate>;
 
     async fn get_local_description(&self) -> Option<SessionDescription>;
 
-    async fn add_ice_candidates(&self, remote_candidates: Vec<ICECandidate>) -> Result<(), E>;
+    async fn add_ice_candidates(&self, remote_candidates: Vec<ICECandidate>) -> Result<(), Error>;
 
-    async fn set_remote_description(&self, remote_answer: SessionDescription) -> Result<(), E>;
+    async fn set_remote_description(&self, remote_answer: SessionDescription) -> Result<(), Error>;
 
     fn is_offerer(&self) -> bool;
 
-    fn try_receive_channel(&mut self) -> Result<C, E>;
+    fn try_receive_channel(&mut self) -> Result<Channel, Error>;
 }
 
 #[derive(thiserror::Error, Debug)]
