@@ -12,8 +12,6 @@ pub const DEFAULT_REQUEST_DEADLINE: Duration = Duration::from_secs(10);
 pub enum ClientError {
     #[error(transparent)]
     Bincode(#[from] bincode::Error),
-    #[error("Invalid response from server!")]
-    InvalidResponse,
     #[error("Pre-existing connection with peer!")]
     PreExistingPeerConnection,
     #[error("Listener closed unexpectedly!")]
@@ -58,11 +56,15 @@ where
     C: serde::de::DeserializeOwned,
 {
     if let Some(message) = listener.message().await? {
-        let signal = message.offer_signal.ok_or(ClientError::InvalidResponse)?;
-        let offer = bincode::deserialize(&signal.offer)?;
-        let candidates = bincode::deserialize(&signal.candidates)?;
-        let offer_set = SignalSet { desc: offer, candidates, remote_id: signal.offerer_id };
-        Ok((listener, offer_set))
+        if let Some(signal) = message.offer_signal {
+            let offer = bincode::deserialize(&signal.offer)?;
+            let candidates = bincode::deserialize(&signal.candidates)?;
+            let offer_set = SignalSet { desc: offer, candidates, remote_id: signal.offerer_id };
+            Ok((listener, offer_set))
+        } else {
+            trace!("received empty offer message.");
+            offer_listener_task(listener).boxed_local().await
+        }
     } else {
         Err(ClientError::ListenerClosed)
     }
@@ -76,11 +78,15 @@ where
     C: serde::de::DeserializeOwned,
 {
     if let Some(message) = listener.message().await? {
-        let signal = message.answer_signal.ok_or(ClientError::InvalidResponse)?;
-        let answer = bincode::deserialize(&signal.answer)?;
-        let candidates = bincode::deserialize(&signal.candidates)?;
-        let answer_set = SignalSet { desc: answer, candidates, remote_id: signal.answerer_id };
-        Ok((listener, answer_set))
+        if let Some(signal) = message.answer_signal {
+            let answer = bincode::deserialize(&signal.answer)?;
+            let candidates = bincode::deserialize(&signal.candidates)?;
+            let answer_set = SignalSet { desc: answer, candidates, remote_id: signal.answerer_id };
+            Ok((listener, answer_set))
+        } else {
+            trace!("received empty answer message.");
+            answer_listener_task(listener).boxed_local().await
+        }
     } else  {
         Err(ClientError::ListenerClosed)
     }
@@ -102,11 +108,13 @@ impl RtcSignallingClient {
     /// Private advertise helper method
     async fn advertise(&self) -> Result<u64, tonic::Status> {
         let request = Request::from_parts(self.grpc_metadata.clone(), Extensions::default(), AdvertiseReq {});
+        debug!("sending advertise request");
         let response = {
             let mut client = self.inner.lock().await;
             client.advertise(request).await?
         };
         let local_id = response.into_inner().local_peer.unwrap().id;
+        debug!("received advertise response ({local_id:#016x})");
         Ok(local_id)
     }
     /// Private peer discover helper method
@@ -116,10 +124,12 @@ impl RtcSignallingClient {
             Extensions::default(),
             PeerDiscoverReq { local_peer: Some(PeerId { id }) }
         );
+        debug!("sending peer discover request ({id:#016x})");
         let response = {
             let mut client = self.inner.lock().await;
             client.peer_discover(request).await?
         };
+        debug!("received peer discover response ({id:#016x})");
         Ok(response.into_inner().remote_peers.into_iter().map(|peer| peer.id).collect())
     }
     /// Private open peer listener helper method
@@ -129,10 +139,12 @@ impl RtcSignallingClient {
             Extensions::default(),
             PeerListenerReq { local_peer: Some(PeerId { id }) }
         );
+        debug!("sending open peer listener request ({id:#016x})");
         let response = {
             let mut client = self.inner.lock().await;
             client.open_peer_listener(request).await?
         };
+        debug!("received open peer listener response ({id:#016x})");
         let peer_listener = response.into_inner();
         Ok(peer_listener)
     }
@@ -143,10 +155,12 @@ impl RtcSignallingClient {
             Extensions::default(),
             OfferListenerReq { local_peer: Some(PeerId { id }) }
         );
+        debug!("sending open offer listener request ({id:#016x})");
         let response = {
             let mut client = self.inner.lock().await;
             client.open_offer_listener(request).await?
         };
+        debug!("received open offer listener response ({id:#016x})");
         let offer_listener = response.into_inner();
         Ok(offer_listener)
     }
@@ -157,10 +171,12 @@ impl RtcSignallingClient {
             Extensions::default(),
             AnswerListenerReq { local_peer: Some(PeerId { id }) }
         );
+        debug!("sending open answer listener request ({id:#016x})");
         let response = {
             let mut client = self.inner.lock().await;
             client.open_answer_listener(request).await?
         };
+        debug!("received open answer listener response ({id:#016x})");
         let answer_listener = response.into_inner();
         Ok(answer_listener)
     }
@@ -187,10 +203,12 @@ impl RtcSignallingClient {
                 answer_signal: Some(answer_signal),
             }
         );
+        debug!("sending signal answer request ({id:#016x})");
         let _response = {
             let mut client = self.inner.lock().await;
             client.signal_answer(request).await?
         };
+        debug!("received signal answer response ({id:#016x})");
         Ok(remote_id)
     }
     /// Private signal offer helper method
@@ -217,10 +235,12 @@ impl RtcSignallingClient {
             }
         );
         // queue signalling of offer
+        debug!("sending signal offer request ({id:#016x})");
         let _response = {
             let mut client = self.inner.lock().await;
             client.signal_offer(request).await?
         };
+        debug!("received signal offer response ({id:#016x})");
         Ok(remote_id)
     }
 }
@@ -257,6 +277,7 @@ impl RtcSignallingClient {
     pub async fn connect(
         addr: String,
         timeout: Option<Duration>,
+        tls_enabled: bool,
         domain: Option<String>,
         tls_ca_pem: Option<String>,
     ) -> ClientResult<Self> {
@@ -268,7 +289,7 @@ impl RtcSignallingClient {
         // create the client
         #[cfg(not(target_arch = "wasm32"))]
         let client = {
-            let endpoint = if domain.is_some() && tls_ca_pem.is_some() {
+            let endpoint = if domain.is_some() && tls_ca_pem.is_some() && tls_enabled {
                 let ca_certificate = tonic::transport::Certificate::from_pem(tls_ca_pem.unwrap());
                 let tls_config = tonic::transport::ClientTlsConfig::new()
                     .domain_name(domain.unwrap())
@@ -288,7 +309,8 @@ impl RtcSignallingClient {
             if domain.is_some() || tls_ca_pem.is_some() {
                 warn!("Signalling client domain/tls settings are ignored! Client TLS is handled by the browser.");
             }
-            let client = tonic_web_wasm_client::new(addr);
+            let addr = if tls_enabled { format!("https://{addr}") } else { format!("http://{addr}") };
+            let client = tonic_web_wasm_client::Client::new(addr);
             crate::pb::rtc_signalling_client::RtcSignallingClient::new(client)
         };
         // advertise local peer
@@ -336,6 +358,7 @@ impl RtcSignallingClient {
         // init empty list of discovered peers
         let mut discovered_peers: HashSet<u64> = HashSet::new();
         let mut first_discovery = true;
+        debug!("signalling loop start");
         // concurrent signalling loop
         loop {
             select! {
