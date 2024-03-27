@@ -142,7 +142,7 @@ impl Channel<Arc<RTCDataChannel>> {
     }
 }
 
-pub type PeerConnection = GenericPeerConnection<RTCPeerConnection, Arc<RTCDataChannel>>;
+pub type PeerConnection = GenericPeerConnection<Arc<RTCPeerConnection>, Arc<RTCDataChannel>>;
 
 impl PeerConnection {
     pub async fn get_local_description(&self) -> Option<SessionDescription> {

@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, sync::Arc};
+use std::marker::PhantomData;
 
 use bytes::Bytes;
 use platform::Platform;
@@ -33,7 +33,7 @@ impl<T> Channel<T> {
 
 pub struct GenericPeerConnection<T, U> {
     is_offerer: bool,
-    connection: Arc<T>,
+    connection: T,
     peer_connection_state_rx: watch::Receiver<PeerConnectionState>,
     channels_rx: UnboundedReceiver<Channel<U>>,
     candidate_rx: UnboundedReceiver<Option<ICECandidate>>,

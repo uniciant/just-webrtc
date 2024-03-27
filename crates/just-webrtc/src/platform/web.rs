@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::rc::Rc;
 
 use bytes::Bytes;
 use js_sys::{Function, Reflect};
@@ -31,7 +31,7 @@ pub struct Web {}
 impl Platform for Web {}
 
 fn handle_peer_connection_state_change(
-    connection: Arc<RtcPeerConnection>,
+    connection: Rc<RtcPeerConnection>,
     peer_state_tx: &watch::Sender<PeerConnectionState>
 ) {
     let state = connection.connection_state();
@@ -136,7 +136,7 @@ fn handle_data_channel_error(
 }
 
 fn handle_ice_connection_state_change(
-    connection: Arc<RtcPeerConnection>
+    connection: Rc<RtcPeerConnection>
 ) {
     let state = connection.ice_connection_state();
     debug!("ICE connection state has changed: {state:?}");
@@ -146,7 +146,7 @@ fn handle_ice_connection_state_change(
 }
 
 fn handle_ice_gathering_state_change(
-    connection: Arc<RtcPeerConnection>
+    connection: Rc<RtcPeerConnection>
 ) {
     let state = connection.ice_gathering_state();
     debug!("ICE gathering state has changed: {state:?}");
@@ -187,7 +187,7 @@ impl Channel<RtcDataChannel> {
     }
 }
 
-pub type PeerConnection = GenericPeerConnection<RtcPeerConnection, RtcDataChannel>;
+pub type PeerConnection = GenericPeerConnection<Rc<RtcPeerConnection>, RtcDataChannel>;
 
 impl PeerConnection {
     pub async fn get_local_description(&self) -> Option<SessionDescription> {
@@ -234,7 +234,7 @@ impl PeerConnectionBuilder<Web> {
         config.peer_identity(Some(&self.config.peer_identity));
 
         // create new connection from config
-        let connection = Arc::new(RtcPeerConnection::new_with_configuration(&config).map_err(js_value_to_error)?);
+        let connection = Rc::new(RtcPeerConnection::new_with_configuration(&config).map_err(js_value_to_error)?);
 
         // create mpsc channels for passing info to/from handlers
         let (candidate_tx, candidate_rx) = tokio::sync::mpsc::unbounded_channel::<Option<ICECandidate>>();
