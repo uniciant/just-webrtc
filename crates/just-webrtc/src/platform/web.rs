@@ -7,7 +7,7 @@ use log::{debug, error, trace};
 use wasm_bindgen::{closure::Closure, convert::FromWasmAbi, JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
-use web_sys::{Event, MessageEvent, RtcBundlePolicy, RtcConfiguration, RtcDataChannel, RtcDataChannelEvent, RtcDataChannelInit, RtcIceCandidateInit, RtcIceConnectionState, RtcIceTransportPolicy, RtcPeerConnection, RtcPeerConnectionIceEvent, RtcPeerConnectionState, RtcSdpType, RtcSessionDescriptionInit};
+use web_sys::{Event, MessageEvent, RtcBundlePolicy, RtcConfiguration, RtcDataChannel, RtcDataChannelEvent, RtcDataChannelInit, RtcDataChannelType, RtcIceCandidateInit, RtcIceConnectionState, RtcIceTransportPolicy, RtcPeerConnection, RtcPeerConnectionIceEvent, RtcPeerConnectionState, RtcSdpType, RtcSessionDescriptionInit};
 
 use crate::{types::{BundlePolicy, ICECandidate, ICETransportPolicy, PeerConnectionState, SDPType, SessionDescription}, Channel, GenericPeerConnection, PeerConnectionBuilder};
 use super::Platform;
@@ -51,6 +51,8 @@ fn handle_data_channel(
 ) {
     let label = channel.label();
     let id = channel.id().unwrap_or(0);  // zero values are None?
+    // override default 'blob' binary type format that is unsupported on most browsers
+    channel.set_binary_type(RtcDataChannelType::Arraybuffer);
 
     // create mpsc channels for passing info to/from handlers
     let (incoming_tx, rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
