@@ -32,6 +32,12 @@ impl Signalling {
     }
 }
 
+impl Default for Signalling {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct RtcSignallingService {
     inner: Arc<Signalling>,
 }
