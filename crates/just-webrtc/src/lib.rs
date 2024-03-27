@@ -3,70 +3,45 @@ use std::marker::PhantomData;
 use bytes::Bytes;
 use platform::Platform;
 
-use tokio::sync::{mpsc::{error::TryRecvError, UnboundedReceiver}, watch};
-
 pub mod platform;
 pub mod types;
 
-use types::{DataChannelOptions, ICECandidate, ICEServer, PeerConfiguration, PeerConnectionState, SessionDescription};
+use types::{DataChannelOptions, ICECandidate, ICEServer, PeerConfiguration, SessionDescription};
 
-pub struct Channel<T> {
-    inner: T,
-    ready_state_rx: watch::Receiver<bool>,
-    rx: UnboundedReceiver<Bytes>,
+#[cfg_attr(not(target_arch = "wasm32"), trait_variant::make(Send))]
+pub trait DataChannelExt<E> {
+    async fn wait_ready(&mut self) -> Result<(), E>;
+
+    async fn receive(&mut self) -> Option<Bytes>;
+
+    async fn send(&self, data: &Bytes) -> Result<usize, E>;
+
+    fn try_receive(&mut self) -> Result<Bytes, E>;
+
+    fn try_send(&self, data: &Bytes) -> Result<usize, E>;
+
+    fn id(&self) -> u16;
+
+    fn label(&self) -> String;
 }
 
-impl<T> Channel<T> {
-    pub async fn wait_ready(&mut self) -> Result<(), watch::error::RecvError> {
-        let _ = self.ready_state_rx.wait_for(|s| s == &true).await?;
-        Ok(())
-    }
+#[cfg_attr(not(target_arch = "wasm32"), trait_variant::make(Send))]
+pub trait PeerConnectionExt<C, E> {
+    async fn wait_peer_connected(&mut self) -> Result<(), E>;
 
-    pub async fn receive(&mut self) -> Option<Bytes> {
-        self.rx.recv().await
-    }
+    async fn receive_channel(&mut self) -> Option<C>;
 
-    pub fn try_receive(&mut self) -> Result<Bytes, TryRecvError> {
-        self.rx.try_recv()
-    }
-}
+    async fn collect_ice_candidates(&mut self) -> Vec<ICECandidate>;
 
-pub struct GenericPeerConnection<T, U> {
-    is_offerer: bool,
-    connection: T,
-    peer_connection_state_rx: watch::Receiver<PeerConnectionState>,
-    channels_rx: UnboundedReceiver<Channel<U>>,
-    candidate_rx: UnboundedReceiver<Option<ICECandidate>>,
-}
+    async fn get_local_description(&self) -> Option<SessionDescription>;
 
-impl<T, U> GenericPeerConnection<T, U> {
-    pub fn is_offerer(&self) -> bool {
-        self.is_offerer
-    }
+    async fn add_ice_candidates(&self, remote_candidates: Vec<ICECandidate>) -> Result<(), E>;
 
-    pub async fn wait_peer_connected(&mut self) -> Result<(), watch::error::RecvError> {
-        let _ = self.peer_connection_state_rx.wait_for(|s| s == &PeerConnectionState::Connected).await?;
-        Ok(())
-    }
+    async fn set_remote_description(&self, remote_answer: SessionDescription) -> Result<(), E>;
 
-    pub async fn receive_channel(&mut self) -> Option<Channel<U>> {
-        self.channels_rx.recv().await
-    }
+    fn is_offerer(&self) -> bool;
 
-    pub fn try_receive_channel(&mut self) -> Result<Channel<U>, TryRecvError> {
-        self.channels_rx.try_recv()
-    }
-
-    /// Collect all ICE candidates for the current negotiation
-    pub async fn collect_ice_candidates(&mut self) -> Vec<ICECandidate> {
-        let mut candidate_inits = vec![];
-        loop {
-            match self.candidate_rx.recv().await {
-                Some(Some(candidate_init)) => candidate_inits.push(candidate_init),
-                _ => return candidate_inits,
-            }
-        }
-    }
+    fn try_receive_channel(&mut self) -> Result<C, E>;
 }
 
 #[derive(thiserror::Error, Debug)]
