@@ -2,21 +2,25 @@
 #[cfg(feature = "server")]
 #[tokio::main]
 async fn main() {
-    use std::time::Duration;
-    use just_webrtc_signalling::{DEFAULT_NATIVE_SERVER_ADDR, DEFAULT_WEB_SERVER_ADDR};
+    use std::{sync::Arc, time::Duration};
+    use just_webrtc_signalling::{server::Signalling, DEFAULT_NATIVE_SERVER_ADDR, DEFAULT_WEB_SERVER_ADDR};
 
     const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
 
     pretty_env_logger::try_init().unwrap();
 
+    // create shared mapped signalling channels
+    let signalling = Arc::new(Signalling::new());
     // create server futures
     let serve_fut = just_webrtc_signalling::server::serve(
+        signalling.clone(),
         DEFAULT_NATIVE_SERVER_ADDR.parse().unwrap(),
         Some(KEEPALIVE_INTERVAL), None,
         None,
     );
     #[cfg(feature = "server-web")]
     let serve_web_fut = just_webrtc_signalling::server::serve_web(
+        signalling,
         DEFAULT_WEB_SERVER_ADDR.parse().unwrap(),
         Some(KEEPALIVE_INTERVAL), None,
         None,

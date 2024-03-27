@@ -1,9 +1,10 @@
-use std::{collections::HashMap, net::SocketAddr, sync::{atomic::AtomicU64, RwLock}, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, pin::Pin, sync::{atomic::AtomicU64, Arc}, time::Duration};
 
-use log::{debug, info};
+use futures::{Stream, StreamExt};
+use log::{debug, info, warn};
 
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Result, Status};
 
 use crate::pb::{
@@ -14,18 +15,30 @@ static GENERATOR: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Default)]
 struct Listeners {
-    peer_listener: RwLock<Option<mpsc::UnboundedSender<Result<PeerListenerRsp>>>>,
-    offer_listener: RwLock<Option<mpsc::UnboundedSender<Result<OfferListenerRsp>>>>,
-    answer_listener: RwLock<Option<mpsc::UnboundedSender<Result<AnswerListenerRsp>>>>,
+    offer_listener: RwLock<Option<mpsc::Sender<Result<OfferListenerRsp>>>>,
+    answer_listener: RwLock<Option<mpsc::Sender<Result<AnswerListenerRsp>>>>,
+}
+
+/// Mapped signalling channels
+pub struct Signalling {
+    peers: RwLock<HashMap<u64, Listeners>>,
+    peer_broadcast: broadcast::Sender<Result<PeerListenerRsp>>,
+}
+
+impl Signalling {
+    pub fn new() -> Self {
+        let (tx, _) = broadcast::channel(16);
+        Self { peers: RwLock::new(HashMap::new()), peer_broadcast: tx }
+    }
 }
 
 pub struct RtcSignallingService {
-    peers: RwLock<HashMap<u64, Listeners>>,
+    inner: Arc<Signalling>,
 }
 
 impl RtcSignallingService {
-    pub fn new_svc() -> RtcSignallingServer<RtcSignallingService> {
-        RtcSignallingServer::new(RtcSignallingService { peers: RwLock::new(HashMap::new()) })
+    pub fn new_svc(signalling: Arc<Signalling>) -> RtcSignallingServer<RtcSignallingService> {
+        RtcSignallingServer::new(RtcSignallingService { inner: signalling })
     }
 }
 
@@ -39,7 +52,7 @@ impl RtcSignalling for RtcSignallingService {
         // generate ID and insert new entry (write lock scope)
         let id = {
             let id = GENERATOR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let mut peers = self.peers.write().unwrap();
+            let mut peers = self.inner.peers.write().await;
             if peers.contains_key(&id) {
                 return Err(Status::internal("generated duplicate ID!"))
             }
@@ -48,15 +61,10 @@ impl RtcSignalling for RtcSignallingService {
         };
         // transmit change to peer listeners
         let peer_change = PeerChange { id, change: Change::PeerChangeAdd as i32 };
-        let peers = self.peers.read().unwrap();
-        for (_peer_id, listeners) in peers.iter() {
-            let peer_listener = listeners.peer_listener.read().unwrap();
-            if let Some(tx) = peer_listener.as_ref() {
-                if tx.send(Ok(PeerListenerRsp { peer_changes: vec![peer_change.clone()] })).is_err() {
-                    return Err(Status::internal("peer listener receiver was dropped! peer unavailable!"))
-                }
-            }
-        }
+        match self.inner.peer_broadcast.send(Ok(PeerListenerRsp { peer_changes: vec![peer_change] })) {
+            Ok(rx_count) => debug!("broadcast new peer to {rx_count} listeners"),
+            Err(_) => warn!("no active peer listeners!"),
+        };
         // return generated ID
         info!("new peer: {id:#016x}");
         Ok(Response::new(AdvertiseRsp { local_peer: Some(PeerId { id })}))
@@ -68,7 +76,7 @@ impl RtcSignalling for RtcSignallingService {
     ) -> Result<Response<PeerDiscoverRsp>> {
         let local_peer = request.into_inner().local_peer.ok_or(Status::invalid_argument("missing local peer ID"))?;
         debug!("received peer discover request ({:#016x})", local_peer.id);
-        let peers = self.peers.read().unwrap();
+        let peers = self.inner.peers.read().await;
         let remote_peers = peers.iter()
             .filter_map(|(id, _)| {
                 if id == &local_peer.id { None } else { Some(PeerId { id: *id }) }
@@ -83,41 +91,52 @@ impl RtcSignalling for RtcSignallingService {
     ) -> Result<Response<Self::OpenPeerListenerStream>> {
         let local_peer = request.into_inner().local_peer.ok_or(Status::invalid_argument("missing local peer ID"))?;
         debug!("received open peer listener request ({:#016x})", local_peer.id);
-        // create channel for transferring peer changes
-        let (tx, rx) = mpsc::unbounded_channel();
-        // send initial peers
-        let peers = self.peers.read().unwrap();
-        let peer_changes = peers.iter()
-            .filter_map(|(id, _)| {
-                if id == &local_peer.id { None } else { Some(PeerChange { id: *id, change: Change::PeerChangeAdd as i32 } )}
-            })
-            .collect();
-        tx.send(Ok(PeerListenerRsp { peer_changes } )).unwrap();
-        // create peer listener
-        let peer = peers.get(&local_peer.id).ok_or(Status::failed_precondition("listener peer not advertised!"))?;
-        let mut peer_listener = peer.peer_listener.write().unwrap();
-        if peer_listener.replace(tx).is_some() {
-            return Err(Status::already_exists("peer listener already exists!"));
-        }
+        // collect initial peer 'changes'
+        let initial_peer_changes = {
+            let peers = self.inner.peers.read().await;
+            peers.iter()
+                .filter_map(|(id, _)| {
+                    if id == &local_peer.id { None } else { Some(PeerChange { id: *id, change: Change::PeerChangeAdd as i32 }) }
+                })
+                .collect()
+        };
+        // create stream from broadcast of received peer changes
+        let mut rx = self.inner.peer_broadcast.subscribe();
+        let outbound = async_stream::stream! {
+            // load first result with initial peer changes
+            let mut result = Ok(PeerListenerRsp { peer_changes: initial_peer_changes });
+            loop {
+                yield result;
+                result = match rx.recv().await {
+                    Ok(message) => message,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_missed)) =>
+                        Err(Status::data_loss("peer listener has lagged behind. peer changes have been lost!")),
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        Err(Status::internal("peer changes broadcast is closed!"))
+                    }
+                };
+            }
+        };
         // return stream
-        Ok(Response::new(UnboundedReceiverStream::new(rx)))
+        Ok(Response::new(outbound.boxed()))
     }
-    type OpenPeerListenerStream = UnboundedReceiverStream<Result<PeerListenerRsp>>;
+    type OpenPeerListenerStream = Pin<Box<dyn Stream<Item = Result<PeerListenerRsp>> + Send + 'static>>;
 
     async fn signal_offer(
         &self,
         request: Request<SignalOfferReq>,
     ) -> Result<Response<SignalOfferRsp>> {
+        debug!("check");
         let message = request.into_inner();
         let answerer_peer = message.answerer_peer.ok_or(Status::invalid_argument("missing answerer peer ID"))?;
         let offer_signal = message.offer_signal.ok_or(Status::invalid_argument("missing offer signal"))?;
         debug!("received signal offer request ({:#016x})", offer_signal.offerer_id);
         // transmit offer to listener
-        let peers = self.peers.read().unwrap();
+        let peers = self.inner.peers.read().await;
         let peer = peers.get(&answerer_peer.id).ok_or(Status::failed_precondition("answerer peer not advertised!"))?;
-        let offer_listener = peer.offer_listener.read().unwrap();
+        let offer_listener = peer.offer_listener.read().await;
         if let Some(tx) = offer_listener.as_ref() {
-            if tx.send(Ok(OfferListenerRsp { offer_signal: Some(offer_signal) })).is_err() {
+            if tx.send(Ok(OfferListenerRsp { offer_signal: Some(offer_signal) })).await.is_err() {
                 return Err(Status::failed_precondition("offer listener receiver was dropped! peer unavailable!"));
             }
         } else {
@@ -135,18 +154,20 @@ impl RtcSignalling for RtcSignallingService {
         let local_peer = message.local_peer.ok_or(Status::invalid_argument("missing local peer ID"))?;
         debug!("received open offer listener request ({:#016x})", local_peer.id);
         // create channel for transferring offer signals
-        let (tx, rx) = mpsc::unbounded_channel::<Result<OfferListenerRsp>>();
+        let (tx, rx) = mpsc::channel::<Result<OfferListenerRsp>>(16);
+        // load channel with initial empty response
+        tx.try_send(Ok(OfferListenerRsp { offer_signal: None })).unwrap();
         // create offer listener
-        let peers = self.peers.read().unwrap();
+        let peers = self.inner.peers.read().await;
         let peer = peers.get(&local_peer.id).ok_or(Status::failed_precondition("listener peer not advertised!"))?;
-        let mut offer_listener = peer.offer_listener.write().unwrap();
+        let mut offer_listener = peer.offer_listener.write().await;
         if offer_listener.replace(tx).is_some() {
             return Err(Status::already_exists("offer listener already exists!"))
         }
         // return stream
-        Ok(Response::new(UnboundedReceiverStream::new(rx)))
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
-    type OpenOfferListenerStream = UnboundedReceiverStream<Result<OfferListenerRsp>>;
+    type OpenOfferListenerStream = ReceiverStream<Result<OfferListenerRsp>>;
 
     async fn signal_answer(
         &self,
@@ -157,11 +178,11 @@ impl RtcSignalling for RtcSignallingService {
         let answer_signal = message.answer_signal.ok_or(Status::invalid_argument("missing answer signal"))?;
         debug!("received signal answer request ({:#016x})", answer_signal.answerer_id);
         // deliver answer to offerer peer
-        let peers = self.peers.read().unwrap();
+        let peers = self.inner.peers.read().await;
         let peer = peers.get(&offerer_peer.id).ok_or(Status::failed_precondition("answerer peer not advertised!"))?;
-        let answer_listener = peer.answer_listener.read().unwrap();
+        let answer_listener = peer.answer_listener.read().await;
         if let Some(tx) = answer_listener.as_ref() {
-            if tx.send(Ok(AnswerListenerRsp { answer_signal: Some(answer_signal) })).is_err() {
+            if tx.send(Ok(AnswerListenerRsp { answer_signal: Some(answer_signal) })).await.is_err() {
                 return Err(Status::internal("answer listener receiver was dropped! peer unavailable!"));
             }
         } else {
@@ -179,28 +200,31 @@ impl RtcSignalling for RtcSignallingService {
         let local_peer = message.local_peer.ok_or(Status::invalid_argument("missing local peer ID"))?;
         debug!("received open answer listener request ({:#016x})", local_peer.id);
         // create channel for transferring answer signals
-        let (tx, rx) = mpsc::unbounded_channel::<Result<AnswerListenerRsp>>();
+        let (tx, rx) = mpsc::channel::<Result<AnswerListenerRsp>>(16);
+        // load channel with initial empty response
+        tx.try_send(Ok(AnswerListenerRsp { answer_signal: None })).unwrap();
         // create answer listener
-        let peers = self.peers.read().unwrap();
+        let peers = self.inner.peers.read().await;
         let peer = peers.get(&local_peer.id).ok_or(Status::failed_precondition("listener peer not advertised!"))?;
-        let mut answer_listener = peer.answer_listener.write().unwrap();
+        let mut answer_listener = peer.answer_listener.write().await;
         if let Some(_tx) = answer_listener.replace(tx) {
             return Err(Status::already_exists("offer listener already exists!"))
         }
         // return stream
-        Ok(Response::new(UnboundedReceiverStream::new(rx)))
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
-    type OpenAnswerListenerStream = UnboundedReceiverStream<Result<AnswerListenerRsp>>;
+    type OpenAnswerListenerStream = ReceiverStream<Result<AnswerListenerRsp>>;
 }
 
 /// Start service for native clients
 pub async fn serve(
+    signalling: Arc<Signalling>,
     addr: SocketAddr,
     http2_keepalive_interval: Option<Duration>,
     http2_keepalive_timeout: Option<Duration>,
     tls_pem: Option<(String, String)>,
 ) -> Result<(), tonic::transport::Error> {
-    let rtc_signalling_svc = RtcSignallingService::new_svc();
+    let rtc_signalling_svc = RtcSignallingService::new_svc(signalling);
     let builder = tonic::transport::Server::builder()
         .http2_keepalive_interval(http2_keepalive_interval)
         .http2_keepalive_timeout(http2_keepalive_timeout);
@@ -224,18 +248,19 @@ pub async fn serve(
 #[cfg(feature = "server-web")]
 /// Start service for web clients
 pub async fn serve_web(
+    signalling: Arc<Signalling>,
     addr: SocketAddr,
     http2_keepalive_interval: Option<Duration>,
     http2_keepalive_timeout: Option<Duration>,
     tls_pem: Option<(String, String)>,
 ) -> Result<(), tonic::transport::Error> {
-    let rtc_signalling_svc = RtcSignallingService::new_svc();
+    let rtc_signalling_svc = RtcSignallingService::new_svc(signalling);
     // CORS layer control
     const DEFAULT_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
     const DEFAULT_EXPOSED_HEADERS: [&str; 3] =
         ["grpc-status", "grpc-message", "grpc-status-details-bin"];
-    const DEFAULT_ALLOW_HEADERS: [&str; 5] =
-        ["x-grpc-web", "content-type", "x-user-agent", "grpc-timeout", "neshi-client-id"];
+    const DEFAULT_ALLOW_HEADERS: [&str; 4] =
+        ["x-grpc-web", "content-type", "x-user-agent", "grpc-timeout"];
     let cors = tower_http::cors::CorsLayer::new()
         .allow_origin(tower_http::cors::AllowOrigin::mirror_request())
         .allow_credentials(true)
