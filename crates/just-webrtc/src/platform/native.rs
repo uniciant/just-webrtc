@@ -16,14 +16,8 @@ use super::Platform;
 pub struct Native {}
 impl Platform for Native {}
 
-pub struct Channel {
-    inner: Arc<RTCDataChannel>,
-    ready_state_rx: watch::Receiver<bool>,
-    rx: UnboundedReceiver<Bytes>,
-}
-
 #[derive(thiserror::Error, Debug)]
-pub enum NativeError {
+pub enum Error {
     #[error(transparent)]
     MpscTryRecvError(#[from] TryRecvError),
     #[error(transparent)]
@@ -32,8 +26,14 @@ pub enum NativeError {
     WebRtcError(#[from] webrtc::Error),
 }
 
-impl DataChannelExt<NativeError> for Channel {
-    async fn wait_ready(&mut self) -> Result<(), NativeError> {
+pub struct Channel {
+    inner: Arc<RTCDataChannel>,
+    ready_state_rx: watch::Receiver<bool>,
+    rx: UnboundedReceiver<Bytes>,
+}
+
+impl DataChannelExt for Channel {
+    async fn wait_ready(&mut self) -> Result<(), Error> {
         let _ = self.ready_state_rx.wait_for(|s| s == &true).await?;
         Ok(())
     }
@@ -42,17 +42,17 @@ impl DataChannelExt<NativeError> for Channel {
         self.rx.recv().await
     }
 
-    async fn send(&self, data: &Bytes) -> Result<usize, NativeError> {
-        let u = self.inner.send(data).await?;
-        Ok(u)
-    }
-
-    fn try_receive(&mut self) -> Result<Bytes, NativeError> {
+    fn try_receive(&mut self) -> Result<Bytes, Error> {
         let b = self.rx.try_recv()?;
         Ok(b)
     }
 
-    fn try_send(&self, _data: &Bytes) -> Result<usize, NativeError> {
+    async fn send(&self, data: &Bytes) -> Result<usize, Error> {
+        let u = self.inner.send(data).await?;
+        Ok(u)
+    }
+
+    fn try_send(&self, _data: &Bytes) -> Result<usize, Error> {
         unimplemented!();
     }
 
@@ -65,18 +65,59 @@ impl DataChannelExt<NativeError> for Channel {
     }
 }
 
+pub struct PeerConnection {
+    is_offerer: bool,
+    inner: RTCPeerConnection,
+    peer_connection_state_rx: watch::Receiver<PeerConnectionState>,
+    channels_rx: UnboundedReceiver<Channel>,
+    candidate_rx: UnboundedReceiver<Option<ICECandidate>>,
+}
 
-fn handle_peer_connection_state_change(
-    state: RTCPeerConnectionState,
-    peer_state_tx: &watch::Sender<PeerConnectionState>
-) {
-    if state == RTCPeerConnectionState::Failed {
-        error!("Peer connection failed");
-    } else {
-        debug!("Peer connection state has changed: {state}");
+impl PeerConnectionExt for PeerConnection {
+    async fn wait_peer_connected(&mut self) -> Result<(), Error> {
+        let _ = self.peer_connection_state_rx.wait_for(|s| s == &PeerConnectionState::Connected).await?;
+        Ok(())
     }
-    if let Err(e) = peer_state_tx.send(state.into()) {
-        error!("could not send peer connection state! ({e})");
+
+    async fn receive_channel(&mut self) -> Option<Channel> {
+        self.channels_rx.recv().await
+    }
+
+    /// Collect all ICE candidates for the current negotiation
+    async fn collect_ice_candidates(&mut self) -> Vec<ICECandidate> {
+        let mut candidate_inits = vec![];
+        loop {
+            match self.candidate_rx.recv().await {
+                Some(Some(candidate_init)) => candidate_inits.push(candidate_init),
+                _ => return candidate_inits,
+            }
+        }
+    }
+
+    async fn get_local_description(&self) -> Option<SessionDescription> {
+        self.inner.local_description().await.map(|desc| desc.into())
+    }
+
+    async fn add_ice_candidates(&self, remote_candidates: Vec<ICECandidate>) -> Result<(), Error> {
+        // add remote ICE candidates
+        for candidate in remote_candidates {
+            self.inner.add_ice_candidate(candidate.into()).await?;
+        }
+        Ok(())
+    }
+
+    async fn set_remote_description(&self, remote_answer: SessionDescription) -> Result<(), Error> {
+        self.inner.set_remote_description(remote_answer.try_into()?).await?;
+        Ok(())
+    }
+
+    fn is_offerer(&self) -> bool {
+        self.is_offerer
+    }
+
+    fn try_receive_channel(&mut self) -> Result<Channel, Error> {
+        let c = self.channels_rx.try_recv()?;
+        Ok(c)
     }
 }
 
@@ -179,59 +220,17 @@ fn handle_ice_candidate(
     }
 }
 
-pub struct PeerConnection {
-    is_offerer: bool,
-    inner: RTCPeerConnection,
-    peer_connection_state_rx: watch::Receiver<PeerConnectionState>,
-    channels_rx: UnboundedReceiver<Channel>,
-    candidate_rx: UnboundedReceiver<Option<ICECandidate>>,
-}
-
-impl PeerConnectionExt<Channel, NativeError> for PeerConnection {
-    async fn wait_peer_connected(&mut self) -> Result<(), NativeError> {
-        let _ = self.peer_connection_state_rx.wait_for(|s| s == &PeerConnectionState::Connected).await?;
-        Ok(())
+fn handle_peer_connection_state_change(
+    state: RTCPeerConnectionState,
+    peer_state_tx: &watch::Sender<PeerConnectionState>
+) {
+    if state == RTCPeerConnectionState::Failed {
+        error!("Peer connection failed");
+    } else {
+        debug!("Peer connection state has changed: {state}");
     }
-
-    async fn receive_channel(&mut self) -> Option<Channel> {
-        self.channels_rx.recv().await
-    }
-
-    /// Collect all ICE candidates for the current negotiation
-    async fn collect_ice_candidates(&mut self) -> Vec<ICECandidate> {
-        let mut candidate_inits = vec![];
-        loop {
-            match self.candidate_rx.recv().await {
-                Some(Some(candidate_init)) => candidate_inits.push(candidate_init),
-                _ => return candidate_inits,
-            }
-        }
-    }
-
-    async fn get_local_description(&self) -> Option<SessionDescription> {
-        self.inner.local_description().await.map(|desc| desc.into())
-    }
-
-    async fn add_ice_candidates(&self, remote_candidates: Vec<ICECandidate>) -> Result<(), NativeError> {
-        // add remote ICE candidates
-        for candidate in remote_candidates {
-            self.inner.add_ice_candidate(candidate.into()).await?;
-        }
-        Ok(())
-    }
-
-    async fn set_remote_description(&self, remote_answer: SessionDescription) -> Result<(), NativeError> {
-        self.inner.set_remote_description(remote_answer.try_into()?).await?;
-        Ok(())
-    }
-
-    fn is_offerer(&self) -> bool {
-        self.is_offerer
-    }
-
-    fn try_receive_channel(&mut self) -> Result<Channel, NativeError> {
-        let c = self.channels_rx.try_recv()?;
-        Ok(c)
+    if let Err(e) = peer_state_tx.send(state.into()) {
+        error!("could not send peer connection state! ({e})");
     }
 }
 

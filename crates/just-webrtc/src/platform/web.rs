@@ -2,19 +2,28 @@ use std::rc::Rc;
 
 use bytes::Bytes;
 use js_sys::{Function, Reflect};
-use tokio::sync::{mpsc::UnboundedSender, watch};
+use tokio::sync::{mpsc::{UnboundedReceiver, UnboundedSender}, watch};
 use log::{debug, error, trace};
 use wasm_bindgen::{closure::Closure, convert::FromWasmAbi, JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
 use web_sys::{Event, MessageEvent, RtcBundlePolicy, RtcConfiguration, RtcDataChannel, RtcDataChannelEvent, RtcDataChannelInit, RtcDataChannelType, RtcIceCandidateInit, RtcIceConnectionState, RtcIceTransportPolicy, RtcPeerConnection, RtcPeerConnectionIceEvent, RtcPeerConnectionState, RtcSdpType, RtcSessionDescriptionInit};
 
-use crate::{types::{BundlePolicy, ICECandidate, ICETransportPolicy, PeerConnectionState, SDPType, SessionDescription}, Channel, GenericPeerConnection, PeerConnectionBuilder};
+use crate::{types::{BundlePolicy, ICECandidate, ICETransportPolicy, PeerConnectionState, SDPType, SessionDescription}, Channel, DataChannelExt, PeerConnectionExt, GenericPeerConnection, PeerConnectionBuilder};
 use super::Platform;
 
+pub struct Web {}
+impl Platform for Web {}
+
 #[derive(thiserror::Error, Debug)]
-#[error("webrtc error: {0}")]
-pub struct Error(String);
+pub enum Error {
+    #[error(transparent)]
+    MpscTryRecvError(#[from] watch::error::TryRecvError),
+    #[error(transparent)]
+    WatchRecvError(#[from] watch::error::RecvError),
+    #[error("webrtc error: {0}")]
+    WebRtcError(String)
+}
 
 impl From<serde_wasm_bindgen::Error> for Error {
     fn from(value: serde_wasm_bindgen::Error) -> Self {
@@ -27,21 +36,115 @@ fn js_value_to_error(value: JsValue) -> Error {
     Error::from(value)
 }
 
-pub struct Web {}
-impl Platform for Web {}
+pub struct Channel {
+    inner: RtcDataChannel,
+    ready_state_rx: watch::Receiver<bool>,
+    rx: UnboundedReceiver<Bytes>,
+}
 
-fn handle_peer_connection_state_change(
-    connection: Rc<RtcPeerConnection>,
-    peer_state_tx: &watch::Sender<PeerConnectionState>
-) {
-    let state = connection.connection_state();
-    if state == RtcPeerConnectionState::Failed {
-        error!("Peer connection failed");
-    } else {
-        debug!("Peer connection state has changed: {state:?}");
+impl DataChannelExt for Channel {
+    async fn wait_ready(&mut self) -> Result<(), Error> {
+        let _ = self.ready_state_rx.wait_for(|s| s == &true).await?;
+        Ok(())
     }
-    if let Err(e) = peer_state_tx.send(state.into()) {
-        error!("could not send peer connection state! ({e})");
+
+    async fn receive(&mut self) -> Option<Bytes> {
+        self.rx.recv().await
+    }
+
+    fn try_receive(&mut self) -> Result<Bytes, Error> {
+        let b = self.rx.try_recv()?;
+        Ok(b)
+    }
+
+    async fn send(&self, data: &Bytes) -> Result<(), Error> {
+        self.inner.send_with_u8_array(data).map_err(js_value_to_error)?;
+        Ok(data.len())
+    }
+
+    fn try_send(&self, data: &Bytes) -> Result<usize, Error> {
+        self.inner.send_with_u8_array(data).map_err(js_value_to_error)?;
+        Ok(data.len())
+    }
+
+    fn id(&self) -> u16 {
+        self.inner.id().unwrap_or(0)
+    }
+
+    fn label(&self) -> String {
+        self.inner.label()
+    }
+}
+
+pub struct PeerConnection {
+    is_offerer: bool,
+    inner: RtcPeerConnection,
+    peer_connection_state_rx: watch::Receiver<PeerConnectionState>,
+    channels_rx: UnboundedReceiver<Channel>,
+    candidate_rx: UnboundedReceiver<Option<ICECandidate>>,
+}
+
+impl PeerConnectionExt for PeerConnection {
+    async fn wait_peer_connected(&mut self) -> Result<(), Error> {
+        let _ = self.peer_connection_state_rx.wait_for(|s| s == &PeerConnectionState::Connected).await?;
+        Ok(())
+    }
+
+    async fn receive_channel(&mut self) -> Option<Channel> {
+        self.channels_rx.recv().await
+    }
+
+    fn try_receive_channel(&mut self) -> Result<Channel, Error> {
+        let c = self.channels_rx.try_recv()?;
+        Ok(c)
+    }
+
+    /// Collect all ICE candidates for the current negotiation
+    async fn collect_ice_candidates(&mut self) -> Vec<ICECandidate> {
+        let mut candidate_inits = vec![];
+        loop {
+            match self.candidate_rx.recv().await {
+                Some(Some(candidate_init)) => candidate_inits.push(candidate_init),
+                _ => return candidate_inits,
+            }
+        }
+    }
+
+    async fn get_local_description(&self) -> Option<SessionDescription> {
+        if let Some(js_desc) = self.connection.local_description() {
+            let desc = SessionDescription {
+                sdp: js_desc.sdp(),
+                sdp_type: js_desc.type_().into(),
+            };
+            Some(desc)
+        } else {
+            None
+        }
+    }
+
+    async fn add_ice_candidates(&self, remote_candidates: Vec<ICECandidate>) -> Result<(), Error> {
+        // add remote ICE candidates
+        for candidate in remote_candidates {
+            let mut candidate_init = RtcIceCandidateInit::new(&candidate.candidate);
+            candidate_init.sdp_m_line_index(candidate.sdp_mline_index);
+            candidate_init.sdp_mid(candidate.sdp_mid.as_deref());
+            let js_promise = self.connection.add_ice_candidate_with_opt_rtc_ice_candidate_init(Some(&candidate_init));
+            JsFuture::from(js_promise).await.map_err(js_value_to_error)?;
+        }
+        Ok(())
+    }
+
+    async fn set_remote_description(&self, remote_answer: SessionDescription) -> Result<(), Error> {
+        // add remote description (answer)
+        let mut desc_dict = RtcSessionDescriptionInit::new(remote_answer.sdp_type.into());
+        desc_dict.sdp(&remote_answer.sdp);
+        let js_promise = self.connection.set_remote_description(&desc_dict);
+        JsFuture::from(js_promise).await.map_err(js_value_to_error)?;
+        Ok(())
+    }
+
+    fn is_offerer(&self) -> bool {
+        self.is_offerer
     }
 }
 
@@ -173,54 +276,18 @@ fn handle_ice_candidate(
     }
 }
 
-impl Channel<RtcDataChannel> {
-    pub fn id(&self) -> u16 {
-        self.inner.id().unwrap_or(0)
+fn handle_peer_connection_state_change(
+    connection: Rc<RtcPeerConnection>,
+    peer_state_tx: &watch::Sender<PeerConnectionState>
+) {
+    let state = connection.connection_state();
+    if state == RtcPeerConnectionState::Failed {
+        error!("Peer connection failed");
+    } else {
+        debug!("Peer connection state has changed: {state:?}");
     }
-
-    pub fn label(&self) -> String {
-        self.inner.label()
-    }
-
-    pub async fn send(&self, data: &Bytes) -> Result<(), Error> {
-        self.inner.send_with_u8_array(data).map_err(js_value_to_error)
-    }
-}
-
-pub type PeerConnection = GenericPeerConnection<Rc<RtcPeerConnection>, RtcDataChannel>;
-
-impl PeerConnection {
-    pub async fn get_local_description(&self) -> Option<SessionDescription> {
-        if let Some(js_desc) = self.connection.local_description() {
-            let desc = SessionDescription {
-                sdp: js_desc.sdp(),
-                sdp_type: js_desc.type_().into(),
-            };
-            Some(desc)
-        } else {
-            None
-        }
-    }
-
-    pub async fn add_ice_candidates(&self, remote_candidates: Vec<ICECandidate>) -> Result<(), Error> {
-        // add remote ICE candidates
-        for candidate in remote_candidates {
-            let mut candidate_init = RtcIceCandidateInit::new(&candidate.candidate);
-            candidate_init.sdp_m_line_index(candidate.sdp_mline_index);
-            candidate_init.sdp_mid(candidate.sdp_mid.as_deref());
-            let js_promise = self.connection.add_ice_candidate_with_opt_rtc_ice_candidate_init(Some(&candidate_init));
-            JsFuture::from(js_promise).await.map_err(js_value_to_error)?;
-        }
-        Ok(())
-    }
-
-    pub async fn set_remote_description(&self, remote_answer: SessionDescription) -> Result<(), Error> {
-        // add remote description (answer)
-        let mut desc_dict = RtcSessionDescriptionInit::new(remote_answer.sdp_type.into());
-        desc_dict.sdp(&remote_answer.sdp);
-        let js_promise = self.connection.set_remote_description(&desc_dict);
-        JsFuture::from(js_promise).await.map_err(js_value_to_error)?;
-        Ok(())
+    if let Err(e) = peer_state_tx.send(state.into()) {
+        error!("could not send peer connection state! ({e})");
     }
 }
 
@@ -320,7 +387,7 @@ impl PeerConnectionBuilder<Web> {
         let js_promise = connection.set_local_description(&desc);
         JsFuture::from(js_promise).await.map_err(js_value_to_error)?;
 
-        Ok(PeerConnection { is_offerer, connection, peer_connection_state_rx, channels_rx, candidate_rx })
+        Ok(PeerConnection { is_offerer, inner: connection, peer_connection_state_rx, channels_rx, candidate_rx })
     }
 }
 
