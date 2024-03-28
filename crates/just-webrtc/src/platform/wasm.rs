@@ -1,3 +1,5 @@
+//! Wasm WebRTC implementation using `web_sys`
+
 use std::rc::Rc;
 
 use async_cell::unsync::AsyncCell;
@@ -13,15 +15,21 @@ use web_sys::{Event, MessageEvent, RtcBundlePolicy, RtcConfiguration, RtcDataCha
 use crate::{types::{BundlePolicy, ICECandidate, ICETransportPolicy, PeerConnectionState, SDPType, SessionDescription}, DataChannelExt, PeerConnectionExt, PeerConnectionBuilder};
 use super::Platform;
 
-pub struct Web {}
-impl Platform for Web {}
+/// WASM platform marker
+#[derive(Debug)]
+pub struct Wasm {}
+impl Platform for Wasm {}
 
 #[derive(thiserror::Error, Debug)]
+/// WASM JustWebRTC Error type
 pub enum Error {
+    /// Local unbounded mpsc channel receive error
     #[error("data channel senders dropped!")]
     MpscRecvError,
+    /// Error originating from web_sys
     #[error("webrtc error: {0}")]
     WebRtcError(String),
+    /// Data channel closed error
     #[error("data channel closed!")]
     DataChannelClosed,
 }
@@ -37,6 +45,8 @@ fn js_value_to_error(value: JsValue) -> Error {
     Error::from(value)
 }
 
+/// WASM JustWebRTC channel wrapper
+#[derive(Debug)]
 pub struct Channel {
     inner: RtcDataChannel,
     ready_state: Rc<AsyncCell<bool>>,
@@ -66,6 +76,8 @@ impl DataChannelExt for Channel {
     }
 }
 
+/// WASM JustWebRTC PeerConnection wrapper
+#[derive(Debug)]
 pub struct PeerConnection {
     is_offerer: bool,
     inner: Rc<RtcPeerConnection>,
@@ -83,7 +95,6 @@ impl PeerConnectionExt for PeerConnection {
         self.channels_rx.recv().await.ok_or(Error::MpscRecvError)
     }
 
-    /// Collect all ICE candidates for the current negotiation
     async fn collect_ice_candidates(&mut self) -> Result<Vec<ICECandidate>, Error> {
         let mut candidate_inits = vec![];
         while let Some(candidate_init) = self.candidate_rx.recv().await.ok_or(Error::MpscRecvError)? {
@@ -272,7 +283,8 @@ fn handle_peer_connection_state_change(
     peer_state.set(state.into());
 }
 
-impl PeerConnectionBuilder<Web> {
+impl PeerConnectionBuilder<Wasm> {
+    /// Build new WASM JustWebRTC Peer Connection
     pub async fn build(&self) -> Result<PeerConnection, Error> {
         // parse config to dictionary
         let mut config = RtcConfiguration::new();

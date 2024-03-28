@@ -1,3 +1,8 @@
+#![doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))]
+#![warn(missing_docs)]
+#![warn(missing_debug_implementations)]
+#![warn(dead_code)]
+
 use std::marker::PhantomData;
 
 use bytes::Bytes;
@@ -11,45 +16,51 @@ use platform::{Error, Channel};
 
 #[cfg_attr(not(target_arch = "wasm32"), trait_variant::make(Send))]
 #[cfg_attr(target_arch = "wasm32", allow(async_fn_in_trait))]
-/// Platform agnostic WebRTC DataChannel API
+/// **Platform agnostic WebRTC DataChannel API**
 pub trait DataChannelExt {
+    /// Wait for the data channel to become open and ready to transfer data
     async fn wait_ready(&mut self);
-
+    /// Receive data from the channel
     async fn receive(&mut self) -> Result<Bytes, Error>;
-
+    /// Send data to the channel
     async fn send(&self, data: &Bytes) -> Result<usize, Error>;
-
+    /// Get the unique ID of the channel
     fn id(&self) -> u16;
-
+    /// Get the assigned label of the channel
     fn label(&self) -> String;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), trait_variant::make(Send))]
 #[cfg_attr(target_arch = "wasm32", allow(async_fn_in_trait))]
-/// Platform agnostic WebRTC PeerConnection API
+/// **Platform agnostic WebRTC PeerConnection API**
 pub trait PeerConnectionExt {
+    /// Wait for the peer connection to become connected
     async fn wait_peer_connected(&mut self);
-
+    /// Receive a data channel from the peer connection
     async fn receive_channel(&mut self) -> Result<Channel, Error>;
-
+    /// Collect all ICE candidates from the peer connection
     async fn collect_ice_candidates(&mut self) -> Result<Vec<ICECandidate>, Error>;
-
+    /// Get the local `SessionDescription` of the peer connection
     async fn get_local_description(&self) -> Option<SessionDescription>;
-
+    /// Add remote ICE candidates to the peer connection
     async fn add_ice_candidates(&self, remote_candidates: Vec<ICECandidate>) -> Result<(), Error>;
-
+    /// Pass a remote session description (answer) to the peer connection
     async fn set_remote_description(&self, remote_answer: SessionDescription) -> Result<(), Error>;
-
+    /// Returns true if the `PeerConnection` is the 'local' PeerConnection.
+    /// aka. the `PeerConnection` that created the offer (offerer)
     fn is_offerer(&self) -> bool;
 }
 
 #[derive(thiserror::Error, Debug)]
+/// Error type for `PeerConnectionBuilder`
 pub enum PeerConnectionBuilderError {
+    /// Error raised due to conflicting build options
     #[error("remote offer is mutually exclusive with channel settings!")]
     ConflictingBuildOptions,
 }
 
 /// Builder for WebRTC Peer Connections
+#[derive(Debug)]
 pub struct PeerConnectionBuilder<P: Platform> {
     _platform: PhantomData<P>,
     config: PeerConfiguration,

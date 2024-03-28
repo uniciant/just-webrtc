@@ -1,8 +1,10 @@
-use std::sync::Arc;
+//! Native WebRTC implementation using `webrtc-rs`
+
+use std::{fmt::Debug, sync::Arc};
 
 use async_cell::sync::AsyncCell;
 use bytes::Bytes;
-use flume::{Receiver, RecvError, Sender, TryRecvError};
+use flume::{Receiver, RecvError, Sender};
 use log::{debug, error, trace};
 use webrtc::{
     api::APIBuilder,
@@ -14,23 +16,36 @@ use webrtc::{
 use crate::{types::{BundlePolicy, ICECandidate, ICECredentialType, ICEServer, ICETransportPolicy, PeerConfiguration, PeerConnectionState, RTCPMuxPolicy, SDPType, SessionDescription}, DataChannelExt, DataChannelOptions, PeerConnectionBuilder, PeerConnectionExt};
 use super::Platform;
 
+/// Native platform marker
+#[derive(Debug)]
 pub struct Native {}
 impl Platform for Native {}
 
 #[derive(thiserror::Error, Debug)]
+/// Native JustWebRTC Error type
 pub enum Error {
-    #[error(transparent)]
-    MpscTryRecvError(#[from] TryRecvError),
+    /// Error from flume unbounded mpsc channel
     #[error(transparent)]
     MpscRecvError(#[from] RecvError),
+    /// Error originating from webrtc-rs
     #[error(transparent)]
     WebRtcError(#[from] webrtc::Error),
 }
 
+/// Native JustWebRTC channel wrapper
 pub struct Channel {
     inner: Arc<RTCDataChannel>,
     ready_state: Arc<AsyncCell<bool>>,
     rx: Receiver<Bytes>,
+}
+
+impl Debug for Channel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Channel")
+            .field("ready_state", &self.ready_state)
+            .field("rx", &self.rx)
+            .finish()
+    }
 }
 
 impl DataChannelExt for Channel {
@@ -57,6 +72,8 @@ impl DataChannelExt for Channel {
     }
 }
 
+/// Native JustWebRTC PeerConnection wrapper
+#[derive(Debug)]
 pub struct PeerConnection {
     is_offerer: bool,
     inner: RTCPeerConnection,
@@ -75,7 +92,6 @@ impl PeerConnectionExt for PeerConnection {
         Ok(b)
     }
 
-    /// Collect all ICE candidates for the current negotiation
     async fn collect_ice_candidates(&mut self) -> Result<Vec<ICECandidate>, Error> {
         let mut candidate_inits = vec![];
         while let Some(candidate_init) = self.candidate_rx.recv_async().await? {
@@ -218,7 +234,8 @@ fn handle_peer_connection_state_change(
 }
 
 impl PeerConnectionBuilder<Native> {
-    pub async fn build(&self) -> Result<PeerConnection, webrtc::Error> {
+    /// Build new Native JustWebRTC Peer Connection
+    pub async fn build(&self) -> Result<PeerConnection, Error> {
         // create new connection from the api and config
         let api = APIBuilder::default().build();
 
