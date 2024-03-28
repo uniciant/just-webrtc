@@ -4,12 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1.36", default-features = false, features = ["sync"] }
 bytes = "1.5"
 serde = "1.0"
 log = "0.4.20"
 thiserror = "1.0"
 trait-variant = "0.1.2"
+async_cell = "0.2.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3.68"
@@ -36,10 +36,15 @@ web-sys = { version = "0.3.68", default-features = false, features = [
   "RtcSessionDescription",
   "RtcSessionDescriptionInit",
 ] }
+local-channel = "0.1.5"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 webrtc = "0.10"
+flume = { version = "0.11.0", default-features = false, features = ["async"] }
 
 [dev-dependencies]
 anyhow = "1.0"
 pretty_env_logger = "0.5"
+tokio = { version = "1.36", features = ["rt", "macros"] }
+wasm-bindgen-test = "0.3.42"
+console_log = "1.0"
