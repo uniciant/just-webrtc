@@ -1,0 +1,69 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+  # CI fail on all warnings
+  RUSTFLAGS: "-Dwarnings"
+  RUST_LOG: "debug"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Run Clippy Native
+      run: cargo clippy
+    - name: Run Clippy WASM just-webrtc
+      run: cargo clippy --package just-webrtc --target "wasm32-unknown-unknown"
+    - name: Run Clippy WASM just-webrtc-signalling
+      run: cargo clippy --package just-webrtc-signalling --target "wasm32-unknown-unknown" --no-default-features --features client
+    - name: Run Clippy WASM examples/peer
+      run: cargo clippy --package peer --target "wasm32-unknown-unknown"
+    - name: Check formatting
+      run: cargo fmt --all --check
+
+  doc:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Doc Native
+      run: cargo doc --no-deps
+    - name: Doc WASM just-webrtc
+      run: cargo doc --no-deps --package just-webrtc --target "wasm32-unknown-unknown"
+    - name: Doc WASM just-webrtc-signalling
+      run: cargo doc --no-deps --package just-webrtc-signalling --target "wasm32-unknown-unknown" --no-default-features --features client
+    - name: Doc WASM examples/peer
+      run: cargo doc --no-deps --package peer --target "wasm32-unknown-unknown"
+
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Build
+      run: cargo build
+    - name: Build WASM just-webrtc
+      run: cargo build --package just-webrtc --target "wasm32-unknown-unknown"
+    - name: Build WASM just-webrtc-signaling
+      run: cargo build --package just-webrtc-signalling --target "wasm32-unknown-unknown" --no-default-features --features client
+    - name: Build WASM examples/peer
+      run: cargo build --package peer --target "wasm32-unknown-unknown"
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Run tests Native
+      run: cargo test
+    - name: Install wasm-pack
+      run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+    - name: Run test WASM chrome
+      run: wasm-pack test --headless --chrome
+    - name: Run test WASM firefox
+      run: wasm-pack test --headless --firefox
