@@ -1,6 +1,11 @@
+#![doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))]
+
 #[cfg(all(target_arch = "wasm32", feature = "server"))]
 compile_error!("feature \"server\" is not compatible with target \"wasm32\"");
 
+use prost as _;
+
+#[cfg(any(feature = "client", feature = "server"))]
 pub(crate) mod pb { tonic::include_proto!("main_pb"); }
 
 #[cfg(feature = "client")]

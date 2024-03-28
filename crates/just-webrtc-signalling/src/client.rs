@@ -1,6 +1,6 @@
 use std::{collections::HashSet, future::Future, pin::Pin, time::Duration};
 
-use futures::{pin_mut, select, stream::FuturesUnordered, FutureExt, StreamExt};
+use futures_util::{pin_mut, select, stream::FuturesUnordered, FutureExt, StreamExt};
 use log::{debug, info, trace, warn};
 use tonic::{metadata::MetadataMap, Extensions, Request, Streaming};
 

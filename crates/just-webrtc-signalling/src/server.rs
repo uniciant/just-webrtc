@@ -1,6 +1,6 @@
 use std::{collections::HashMap, net::SocketAddr, pin::Pin, sync::{atomic::AtomicU64, Arc}, time::Duration};
 
-use futures::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt};
 use log::{debug, info, warn};
 
 use tokio::sync::{broadcast, mpsc, RwLock};
