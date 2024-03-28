@@ -1,12 +1,12 @@
-use std::{collections::HashMap, pin::Pin, sync::Arc, time::Duration};
+use std::{collections::HashMap, pin::Pin, sync::Arc, time::Duration, future::Future};
 
 use anyhow::{anyhow, Result};
-use futures::{stream::FuturesUnordered, Future, StreamExt};
-use log::{info, warn};
+use futures_util::{stream::FuturesUnordered, StreamExt};
+use log::info;
 use neshi::{client::{read::NodeReadConnection, write::NodeWriteConnection, NodeClient}, metadata::pb::NodeMeta, state::pb::NodeState};
 use protocol_neshi::{metadata::pb::SignallingMetadata, state::pb::{RtcSignal, SignallingState}, FILE_DESCRIPTOR_SET};
 
-use just_webrtc::{platform::PeerConnection, types::{DataChannelOptions, ICECandidate, SessionDescription}};
+use just_webrtc::{platform::PeerConnection, types::{DataChannelOptions, ICECandidate, SessionDescription}, DataChannelExt, PeerConnectionExt};
 
 const ECHO_REQUEST: &str = "I'm literally Ryan Gosling.";
 const ECHO_RESPONSE: &str = "I know right! He's literally me.";
@@ -40,7 +40,7 @@ async fn remote_peer_connections_task(
         let answer = peer_connection.get_local_description().await
             .ok_or(anyhow!("could not get local description!"))?;
         let answer = bincode::serialize(&answer)?;
-        let candidates = peer_connection.collect_ice_candidates().await;
+        let candidates = peer_connection.collect_ice_candidates().await?;
         let candidates = bincode::serialize(&candidates)?;
         // set answer and updated candidates
         signal.answer = Some(answer);
@@ -75,7 +75,7 @@ async fn local_peer_connection_task(
     let offer = local_peer_connection.get_local_description().await
         .ok_or(anyhow!("could not get local description!"))?;
     let offer = bincode::serialize(&offer)?;
-    let candidates = local_peer_connection.collect_ice_candidates().await;
+    let candidates = local_peer_connection.collect_ice_candidates().await?;
     let candidates = bincode::serialize(&candidates)?;
 
     let signal = RtcSignal {
@@ -115,9 +115,9 @@ async fn peer_echo_task(
     mut peer_connection: PeerConnection,
 ) -> Result<TaskReturnType> {
     info!("started peer echo task.");
-    peer_connection.wait_peer_connected().await?;
+    peer_connection.wait_peer_connected().await;
     let mut channel = peer_connection.receive_channel().await.unwrap();
-    channel.wait_ready().await?;
+    channel.wait_ready().await;
     // prepare echo request/response
     let channel_fmt = format!("{}:{}", channel.label(), channel.id());
     // if offerer, we send echo requests, otherwise we listen for requests
@@ -131,36 +131,28 @@ async fn peer_echo_task(
             let instant = zduny_wasm_timer::Instant::now();
             channel.send(&echo_request).await?;
             // await response
-            if let Some(bytes) = channel.receive().await {
-                let s: &str = bincode::deserialize(&bytes)?;
-                if s == ECHO_RESPONSE {
-                    let elapsed_us = instant.elapsed().as_micros();
-                    info!("Received echo response!({channel_fmt}) ({elapsed_us}us)");
-                }
-            } else {
-                break Err(anyhow!("remote channel closed! ({channel_fmt})"));
+            let bytes = channel.receive().await?;
+            let s: &str = bincode::deserialize(&bytes)?;
+            if s == ECHO_RESPONSE {
+                let elapsed_us = instant.elapsed().as_micros();
+                info!("Received echo response!({channel_fmt}) ({elapsed_us}us)");
             }
-        }?;
+        };
     } else {
         let echo_response = bincode::serialize(ECHO_RESPONSE)?.into();
         loop {
             // await request
-            if let Some(bytes) = channel.receive().await {
-                let s: &str = bincode::deserialize(&bytes)?;
-                if s == ECHO_REQUEST {
-                    info!("Received echo request! Sending response. ({channel_fmt})");
-                    channel.send(&echo_response).await?;
-                }
-            } else {
-                break Err(anyhow!("remote channel closed! ({channel_fmt})"));
+            let bytes = channel.receive().await?;
+            let s: &str = bincode::deserialize(&bytes)?;
+            if s == ECHO_REQUEST {
+                info!("Received echo request! Sending response. ({channel_fmt})");
+                channel.send(&echo_response).await?;
             }
-        }?;
+        };
     }
-    Ok(TaskReturnType::Echo)
 }
 
 enum TaskReturnType {
-    Echo,
     LocalPeerConnection(PeerConnection),
     RemotePeerConnections((NodeWriteConnection, Vec<PeerConnection>))
 }
@@ -199,7 +191,6 @@ async fn run_peer(addr: &str) -> Result<()> {
     // run tasks concurrently
     while let Some(result) = tasks.next().await {
         match result? {
-            TaskReturnType::Echo => { warn!("echo task complete!?") }
             TaskReturnType::LocalPeerConnection(peer_connection) => {
                 // queue echo task for local peer connection
                 tasks.push(Box::pin(peer_echo_task(peer_connection)));
