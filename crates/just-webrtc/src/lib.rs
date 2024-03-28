@@ -7,19 +7,17 @@ pub mod platform;
 pub mod types;
 
 use types::{DataChannelOptions, ICECandidate, ICEServer, PeerConfiguration, SessionDescription};
-use platform::{Error, Channel, PeerConnection};
+use platform::{Error, Channel};
 
 #[cfg_attr(not(target_arch = "wasm32"), trait_variant::make(Send))]
+#[cfg_attr(target_arch = "wasm32", allow(async_fn_in_trait))]
+/// Platform agnostic WebRTC DataChannel API
 pub trait DataChannelExt {
-    async fn wait_ready(&mut self) -> Result<(), Error>;
+    async fn wait_ready(&mut self);
 
-    async fn receive(&mut self) -> Option<Bytes>;
+    async fn receive(&mut self) -> Result<Bytes, Error>;
 
     async fn send(&self, data: &Bytes) -> Result<usize, Error>;
-
-    fn try_receive(&mut self) -> Result<Bytes, Error>;
-
-    fn try_send(&self, data: &Bytes) -> Result<usize, Error>;
 
     fn id(&self) -> u16;
 
@@ -27,12 +25,14 @@ pub trait DataChannelExt {
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), trait_variant::make(Send))]
+#[cfg_attr(target_arch = "wasm32", allow(async_fn_in_trait))]
+/// Platform agnostic WebRTC PeerConnection API
 pub trait PeerConnectionExt {
-    async fn wait_peer_connected(&mut self) -> Result<(), Error>;
+    async fn wait_peer_connected(&mut self);
 
-    async fn receive_channel(&mut self) -> Option<Channel>;
+    async fn receive_channel(&mut self) -> Result<Channel, Error>;
 
-    async fn collect_ice_candidates(&mut self) -> Vec<ICECandidate>;
+    async fn collect_ice_candidates(&mut self) -> Result<Vec<ICECandidate>, Error>;
 
     async fn get_local_description(&self) -> Option<SessionDescription>;
 
@@ -41,8 +41,6 @@ pub trait PeerConnectionExt {
     async fn set_remote_description(&self, remote_answer: SessionDescription) -> Result<(), Error>;
 
     fn is_offerer(&self) -> bool;
-
-    fn try_receive_channel(&mut self) -> Result<Channel, Error>;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -51,6 +49,7 @@ pub enum PeerConnectionBuilderError {
     ConflictingBuildOptions,
 }
 
+/// Builder for WebRTC Peer Connections
 pub struct PeerConnectionBuilder<P: Platform> {
     _platform: PhantomData<P>,
     config: PeerConfiguration,
