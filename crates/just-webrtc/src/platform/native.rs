@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
+use async_cell::sync::AsyncCell;
 use bytes::Bytes;
+use flume::{Receiver, RecvError, Sender, TryRecvError};
 use log::{debug, error, trace};
-use tokio::sync::{mpsc::{error::TryRecvError, UnboundedReceiver, UnboundedSender}, watch};
 use webrtc::{
     api::APIBuilder,
     data_channel::{data_channel_init::RTCDataChannelInit, data_channel_message::DataChannelMessage, RTCDataChannel},
@@ -21,39 +22,30 @@ pub enum Error {
     #[error(transparent)]
     MpscTryRecvError(#[from] TryRecvError),
     #[error(transparent)]
-    WatchRecvError(#[from] watch::error::RecvError),
+    MpscRecvError(#[from] RecvError),
     #[error(transparent)]
     WebRtcError(#[from] webrtc::Error),
 }
 
 pub struct Channel {
     inner: Arc<RTCDataChannel>,
-    ready_state_rx: watch::Receiver<bool>,
-    rx: UnboundedReceiver<Bytes>,
+    ready_state: Arc<AsyncCell<bool>>,
+    rx: Receiver<Bytes>,
 }
 
 impl DataChannelExt for Channel {
-    async fn wait_ready(&mut self) -> Result<(), Error> {
-        let _ = self.ready_state_rx.wait_for(|s| s == &true).await?;
-        Ok(())
+    async fn wait_ready(&mut self) {
+        while !(self.ready_state.take().await) {}
     }
 
-    async fn receive(&mut self) -> Option<Bytes> {
-        self.rx.recv().await
-    }
-
-    fn try_receive(&mut self) -> Result<Bytes, Error> {
-        let b = self.rx.try_recv()?;
+    async fn receive(&mut self) -> Result<Bytes, Error> {
+        let b = self.rx.recv_async().await?;
         Ok(b)
     }
 
     async fn send(&self, data: &Bytes) -> Result<usize, Error> {
         let u = self.inner.send(data).await?;
         Ok(u)
-    }
-
-    fn try_send(&self, _data: &Bytes) -> Result<usize, Error> {
-        unimplemented!();
     }
 
     fn id(&self) -> u16 {
@@ -68,30 +60,28 @@ impl DataChannelExt for Channel {
 pub struct PeerConnection {
     is_offerer: bool,
     inner: RTCPeerConnection,
-    peer_connection_state_rx: watch::Receiver<PeerConnectionState>,
-    channels_rx: UnboundedReceiver<Channel>,
-    candidate_rx: UnboundedReceiver<Option<ICECandidate>>,
+    peer_connection_state: Arc<AsyncCell<PeerConnectionState>>,
+    channels_rx: Receiver<Channel>,
+    candidate_rx: Receiver<Option<ICECandidate>>,
 }
 
 impl PeerConnectionExt for PeerConnection {
-    async fn wait_peer_connected(&mut self) -> Result<(), Error> {
-        let _ = self.peer_connection_state_rx.wait_for(|s| s == &PeerConnectionState::Connected).await?;
-        Ok(())
+    async fn wait_peer_connected(&mut self) {
+        while self.peer_connection_state.take().await != PeerConnectionState::Connected {}
     }
 
-    async fn receive_channel(&mut self) -> Option<Channel> {
-        self.channels_rx.recv().await
+    async fn receive_channel(&mut self) -> Result<Channel, Error> {
+        let b = self.channels_rx.recv_async().await?;
+        Ok(b)
     }
 
     /// Collect all ICE candidates for the current negotiation
-    async fn collect_ice_candidates(&mut self) -> Vec<ICECandidate> {
+    async fn collect_ice_candidates(&mut self) -> Result<Vec<ICECandidate>, Error> {
         let mut candidate_inits = vec![];
-        loop {
-            match self.candidate_rx.recv().await {
-                Some(Some(candidate_init)) => candidate_inits.push(candidate_init),
-                _ => return candidate_inits,
-            }
+        while let Some(candidate_init) = self.candidate_rx.recv_async().await? {
+            candidate_inits.push(candidate_init);
         }
+        Ok(candidate_inits)
     }
 
     async fn get_local_description(&self) -> Option<SessionDescription> {
@@ -114,33 +104,29 @@ impl PeerConnectionExt for PeerConnection {
     fn is_offerer(&self) -> bool {
         self.is_offerer
     }
-
-    fn try_receive_channel(&mut self) -> Result<Channel, Error> {
-        let c = self.channels_rx.try_recv()?;
-        Ok(c)
-    }
 }
 
 fn handle_data_channel(
     channel: Arc<RTCDataChannel>,
-    channels_tx: &UnboundedSender<Channel>,
+    channels_tx: &Sender<Channel>,
 ) {
     let label = channel.label().to_string();
     let id = channel.id();
 
     // create mpsc channels for passing info to/from handlers
-    let (incoming_tx, rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
-    let (ready_state_tx, ready_state_rx) = tokio::sync::watch::channel(false);
+    let (incoming_tx, rx) = flume::unbounded();
+    let ready_state = Arc::new(AsyncCell::new());
 
     debug!("New data channel ({label}:{id})");
     // register data channel handlers
     let (label_close, label_open, label_message) = (label.clone(), label.clone(), label.clone());
+    let (ready_state_close, ready_state_open) = (ready_state.clone(), ready_state.clone());
     channel.on_close(Box::new(move || {
-        handle_data_channel_close(&label_close, &id);
+        handle_data_channel_close(&label_close, &id, &ready_state_close);
         Box::pin(async {})
     }));
     channel.on_open(Box::new(move || {
-        handle_data_channel_open(&label_open, &id, &ready_state_tx);
+        handle_data_channel_open(&label_open, &id, &ready_state_open);
         Box::pin(async {})
     }));
     channel.on_message(Box::new(move |message| {
@@ -153,28 +139,27 @@ fn handle_data_channel(
     }));
 
     // push channel & receiver to list
-    let channel = Channel { inner: channel, rx, ready_state_rx };
+    let channel = Channel { inner: channel, rx, ready_state };
 
     if let Err(e) = channels_tx.send(channel) {
         error!("could not send data channel! ({e})")
     }
 }
 
-fn handle_data_channel_close(label: &str, id: &u16) {
+fn handle_data_channel_close(label: &str, id: &u16, ready_state: &AsyncCell<bool>) {
+    ready_state.set(false);
     debug!("Data channel closed ({label}:{id}");
 }
 
-fn handle_data_channel_open(label: &str, id: &u16, ready_state_tx: &watch::Sender<bool>) {
+fn handle_data_channel_open(label: &str, id: &u16, ready_state: &AsyncCell<bool>) {
+    ready_state.set(true);
     debug!("Data channel open ({label}:{id})");
-    if let Err(e) = ready_state_tx.send(true) {
-        error!("could not send data channel ready state! ({e})");
-    }
 }
 
 fn handle_data_channel_message(
     label: &str,
     id: &u16,
-    incoming_tx: &UnboundedSender<Bytes>,
+    incoming_tx: &Sender<Bytes>,
     message: DataChannelMessage
 ) {
     trace!("Data channel received message ({label}:{id})");
@@ -199,7 +184,7 @@ fn handle_ice_gathering_state_change(state: RTCIceGathererState) {
 
 fn handle_ice_candidate(
     candidate: Option<RTCIceCandidate>,
-    candidate_tx: &UnboundedSender<Option<ICECandidate>>,
+    candidate_tx: &Sender<Option<ICECandidate>>,
 ) {
     let message = if let Some(candidate) = candidate {
         match candidate.to_json() {
@@ -222,16 +207,14 @@ fn handle_ice_candidate(
 
 fn handle_peer_connection_state_change(
     state: RTCPeerConnectionState,
-    peer_state_tx: &watch::Sender<PeerConnectionState>
+    peer_state: &AsyncCell<PeerConnectionState>
 ) {
     if state == RTCPeerConnectionState::Failed {
         error!("Peer connection failed");
     } else {
         debug!("Peer connection state has changed: {state}");
     }
-    if let Err(e) = peer_state_tx.send(state.into()) {
-        error!("could not send peer connection state! ({e})");
-    }
+    peer_state.set(state.into());
 }
 
 impl PeerConnectionBuilder<Native> {
@@ -241,14 +224,15 @@ impl PeerConnectionBuilder<Native> {
 
         let connection: RTCPeerConnection = api.new_peer_connection(self.config.clone().into()).await?;
 
-        // create mpsc channels for passing info to/from handlers
-        let (candidate_tx, candidate_rx) = tokio::sync::mpsc::unbounded_channel::<Option<ICECandidate>>();
-        let (channels_tx, channels_rx) = tokio::sync::mpsc::unbounded_channel::<Channel>();
-        let (peer_connection_state_tx, peer_connection_state_rx) = tokio::sync::watch::channel(PeerConnectionState::New);
+        // create channels for passing info to/from handlers
+        let (candidate_tx, candidate_rx) = flume::unbounded::<Option<ICECandidate>>();
+        let (channels_tx, channels_rx) = flume::unbounded::<Channel>();
+        let peer_connection_state = Arc::new(AsyncCell::new());
 
         // register state change handler
+        let peer_connection_state_2 = peer_connection_state.clone();
         connection.on_peer_connection_state_change(Box::new(move |state| {
-            handle_peer_connection_state_change(state, &peer_connection_state_tx);
+            handle_peer_connection_state_change(state, &peer_connection_state_2);
             Box::pin(async {})
         }));
         // register ice related handlers
@@ -292,7 +276,7 @@ impl PeerConnectionBuilder<Native> {
         // sets the local SessionDescription (offer/answer) and start the UDP listeners
         connection.set_local_description(desc).await?;
 
-        Ok(PeerConnection { is_offerer, inner: connection, peer_connection_state_rx, channels_rx, candidate_rx })
+        Ok(PeerConnection { is_offerer, inner: connection, peer_connection_state, channels_rx, candidate_rx })
     }
 }
 
