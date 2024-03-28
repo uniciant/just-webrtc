@@ -1,10 +1,10 @@
 use std::{cell::OnceCell, collections::HashMap, sync::Mutex, time::Duration};
 
 use anyhow::{anyhow, Result};
-use futures::{FutureExt, StreamExt};
+use futures_util::{FutureExt, StreamExt};
 use log::info;
 
-use just_webrtc::{platform::PeerConnection, types::{DataChannelOptions, ICECandidate, SessionDescription}, PeerConnectionBuilder};
+use just_webrtc::{types::{DataChannelOptions, ICECandidate, SessionDescription}, PeerConnectionBuilder, platform::PeerConnection, PeerConnectionExt, DataChannelExt};
 use just_webrtc_signalling::client::RtcSignallingClient;
 
 const ECHO_REQUEST: &str = "I'm literally Ryan Gosling.";
@@ -25,9 +25,9 @@ async fn peer_echo_task(remote_id: u64) -> Result<u64> {
         let mut peer_connections = peer_connections.lock().unwrap();
         peer_connections.remove(&remote_id)
     }).ok_or(anyhow!("could not get peer connection"))?;
-    peer_connection.wait_peer_connected().await?;
+    peer_connection.wait_peer_connected().await;
     let mut channel = peer_connection.receive_channel().await.unwrap();
-    channel.wait_ready().await?;
+    channel.wait_ready().await;
     // prepare echo request/response
     let channel_fmt = format!("{}:{}", channel.label(), channel.id());
     // if offerer, we send echo requests, otherwise we listen for requests
@@ -41,32 +41,25 @@ async fn peer_echo_task(remote_id: u64) -> Result<u64> {
             let instant = zduny_wasm_timer::Instant::now();
             channel.send(&echo_request).await?;
             // await response
-            if let Some(bytes) = channel.receive().await {
-                let s: &str = bincode::deserialize(&bytes)?;
-                if s == ECHO_RESPONSE {
-                    let elapsed_us = instant.elapsed().as_micros();
-                    info!("Received echo response!({channel_fmt}) ({elapsed_us}us)");
-                }
-            } else {
-                break Err(anyhow!("remote channel closed! ({channel_fmt})"));
+            let bytes = channel.receive().await?;
+            let s: &str = bincode::deserialize(&bytes)?;
+            if s == ECHO_RESPONSE {
+                let elapsed_us = instant.elapsed().as_micros();
+                info!("Received echo response!({channel_fmt}) ({elapsed_us}us)");
             }
-        }?;
+        };
     } else {
         let echo_response = bincode::serialize(ECHO_RESPONSE)?.into();
         loop {
             // await request
-            if let Some(bytes) = channel.receive().await {
-                let s: &str = bincode::deserialize(&bytes)?;
-                if s == ECHO_REQUEST {
-                    info!("Received echo request! Sending response. ({channel_fmt})");
-                    channel.send(&echo_response).await?;
-                }
-            } else {
-                break Err(anyhow!("remote channel closed! ({channel_fmt})"));
+            let bytes = channel.receive().await?;
+            let s: &str = bincode::deserialize(&bytes)?;
+            if s == ECHO_REQUEST {
+                info!("Received echo request! Sending response. ({channel_fmt})");
+                channel.send(&echo_response).await?;
             }
-        }?;
+        };
     }
-    Ok(remote_id)
 }
 
 async fn create_offer(remote_id: u64) -> Result<SignalSet> {
@@ -78,7 +71,7 @@ async fn create_offer(remote_id: u64) -> Result<SignalSet> {
         .build().await?;
     let offer = local_peer_connection.get_local_description().await
         .ok_or(anyhow!("could not get local description!"))?;
-    let candidates = local_peer_connection.collect_ice_candidates().await;
+    let candidates = local_peer_connection.collect_ice_candidates().await?;
     // add new local peer connection to map
     PEER_CONNECTIONS.with(|cell| {
         let peer_connections = cell.get().unwrap();
@@ -99,7 +92,7 @@ async fn receive_offer(offer_set: SignalSet) -> Result<SignalSet> {
     remote_peer_connection.add_ice_candidates(offer_set.candidates).await?;
     let answer = remote_peer_connection.get_local_description().await
         .ok_or(anyhow!("could not get remote description!"))?;
-    let candidates = remote_peer_connection.collect_ice_candidates().await;
+    let candidates = remote_peer_connection.collect_ice_candidates().await?;
     let remote_id = offer_set.remote_id;
     let answer_set = SignalSet {
         desc: answer,
@@ -154,7 +147,7 @@ async fn run_peer(addr: &str) -> Result<()> {
     let receive_offer_fn = Box::new(|offer_set| receive_offer(offer_set).boxed_local());
     let remote_sig_cplt_fn = Box::new(|remote_id| peer_echo_task(remote_id).boxed_local());
     // create signalling client
-    let signalling_client = RtcSignallingClient::connect(addr.to_string(), None, false, None, None).await?;
+    let mut signalling_client = RtcSignallingClient::connect(addr.to_string(), None, false, None, None).await?;
     // run signalling client
     signalling_client.run(
         create_offer_fn,

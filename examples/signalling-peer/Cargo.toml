@@ -1,5 +1,5 @@
 [package]
-name = "peer"
+name = "signalling-peer"
 version = "0.1.0"
 edition = "2021"
 
@@ -10,7 +10,7 @@ anyhow = "1.0"
 just-webrtc = { path = "../../crates/just-webrtc" }
 just-webrtc-signalling = { path = "../../crates/just-webrtc-signalling", default-features = false, features = ["client"] }
 log = "0.4"
-futures = "0.3.30"
+futures-util = "0.3.30"
 zduny-wasm-timer = "0.2.8"
 bincode = "1.3"
 
