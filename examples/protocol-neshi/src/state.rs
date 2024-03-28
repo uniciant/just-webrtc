@@ -1,1 +1,0 @@
-pub mod pb { neshi::include_proto!("state_pb"); }

@@ -1,5 +1,0 @@
-syntax = "proto3";
-
-package metadata_pb;
-
-message SignallingMetadata {}
