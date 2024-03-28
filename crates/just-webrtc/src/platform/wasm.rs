@@ -10,10 +10,21 @@ use log::{debug, error, trace};
 use wasm_bindgen::{closure::Closure, convert::FromWasmAbi, JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
-use web_sys::{Event, MessageEvent, RtcBundlePolicy, RtcConfiguration, RtcDataChannel, RtcDataChannelEvent, RtcDataChannelInit, RtcDataChannelType, RtcIceCandidateInit, RtcIceConnectionState, RtcIceTransportPolicy, RtcPeerConnection, RtcPeerConnectionIceEvent, RtcPeerConnectionState, RtcSdpType, RtcSessionDescriptionInit};
+use web_sys::{
+    Event, MessageEvent, RtcBundlePolicy, RtcConfiguration, RtcDataChannel, RtcDataChannelEvent,
+    RtcDataChannelInit, RtcDataChannelType, RtcIceCandidateInit, RtcIceConnectionState,
+    RtcIceTransportPolicy, RtcPeerConnection, RtcPeerConnectionIceEvent, RtcPeerConnectionState,
+    RtcSdpType, RtcSessionDescriptionInit,
+};
 
-use crate::{types::{BundlePolicy, ICECandidate, ICETransportPolicy, PeerConnectionState, SDPType, SessionDescription}, DataChannelExt, PeerConnectionExt, PeerConnectionBuilder};
 use super::Platform;
+use crate::{
+    types::{
+        BundlePolicy, ICECandidate, ICETransportPolicy, PeerConnectionState, SDPType,
+        SessionDescription,
+    },
+    DataChannelExt, PeerConnectionBuilder, PeerConnectionExt,
+};
 
 /// WASM platform marker
 #[derive(Debug)]
@@ -63,7 +74,9 @@ impl DataChannelExt for Channel {
     }
 
     async fn send(&self, data: &Bytes) -> Result<usize, Error> {
-        self.inner.send_with_u8_array(data).map_err(js_value_to_error)?;
+        self.inner
+            .send_with_u8_array(data)
+            .map_err(js_value_to_error)?;
         Ok(data.len())
     }
 
@@ -97,7 +110,9 @@ impl PeerConnectionExt for PeerConnection {
 
     async fn collect_ice_candidates(&mut self) -> Result<Vec<ICECandidate>, Error> {
         let mut candidate_inits = vec![];
-        while let Some(candidate_init) = self.candidate_rx.recv().await.ok_or(Error::MpscRecvError)? {
+        while let Some(candidate_init) =
+            self.candidate_rx.recv().await.ok_or(Error::MpscRecvError)?
+        {
             candidate_inits.push(candidate_init);
         }
         Ok(candidate_inits)
@@ -121,8 +136,12 @@ impl PeerConnectionExt for PeerConnection {
             let mut candidate_init = RtcIceCandidateInit::new(&candidate.candidate);
             candidate_init.sdp_m_line_index(candidate.sdp_mline_index);
             candidate_init.sdp_mid(candidate.sdp_mid.as_deref());
-            let js_promise = self.inner.add_ice_candidate_with_opt_rtc_ice_candidate_init(Some(&candidate_init));
-            JsFuture::from(js_promise).await.map_err(js_value_to_error)?;
+            let js_promise = self
+                .inner
+                .add_ice_candidate_with_opt_rtc_ice_candidate_init(Some(&candidate_init));
+            JsFuture::from(js_promise)
+                .await
+                .map_err(js_value_to_error)?;
         }
         Ok(())
     }
@@ -132,7 +151,9 @@ impl PeerConnectionExt for PeerConnection {
         let mut desc_dict = RtcSessionDescriptionInit::new(remote_answer.sdp_type.into());
         desc_dict.sdp(&remote_answer.sdp);
         let js_promise = self.inner.set_remote_description(&desc_dict);
-        JsFuture::from(js_promise).await.map_err(js_value_to_error)?;
+        JsFuture::from(js_promise)
+            .await
+            .map_err(js_value_to_error)?;
         Ok(())
     }
 
@@ -141,12 +162,10 @@ impl PeerConnectionExt for PeerConnection {
     }
 }
 
-fn handle_data_channel(
-    channel: RtcDataChannel,
-    channels_tx: &Sender<Channel>,
-) {
+fn handle_data_channel(channel: RtcDataChannel, channels_tx: &Sender<Channel>) {
     let label = channel.label();
-    let id = channel.id().unwrap_or(0);  // zero values are None?
+    let id = channel.id().unwrap_or(0); // zero values are None?
+
     // override default 'blob' binary type format that is unsupported on most browsers
     channel.set_binary_type(RtcDataChannelType::Arraybuffer);
 
@@ -159,47 +178,41 @@ fn handle_data_channel(
     let ready_state_close = ready_state.clone();
     register_leaky_event_handler(
         |f| channel.set_onclose(f),
-        move |event| handle_data_channel_close(&label_close, &id, event, &ready_state_close)
+        move |event| handle_data_channel_close(&label_close, &id, event, &ready_state_close),
     );
     let label_open = label.clone();
     let ready_state_open = ready_state.clone();
     register_leaky_event_handler(
         |f| channel.set_onopen(f),
-        move |event| handle_data_channel_open(&label_open, &id, event, &ready_state_open)
+        move |event| handle_data_channel_open(&label_open, &id, event, &ready_state_open),
     );
     let label_message = label.clone();
     register_leaky_event_handler(
         |f| channel.set_onmessage(f),
-        move |event| handle_data_channel_message(&label_message, &id, &incoming_tx, event)
+        move |event| handle_data_channel_message(&label_message, &id, &incoming_tx, event),
     );
     register_leaky_event_handler(
         |f| channel.set_onerror(f),
-        move |event| handle_data_channel_error(&label, &id, event)
+        move |event| handle_data_channel_error(&label, &id, event),
     );
     // push channel & receiver to list
-    let channel = Channel { inner: channel, rx, ready_state };
+    let channel = Channel {
+        inner: channel,
+        rx,
+        ready_state,
+    };
     if let Err(e) = channels_tx.send(channel) {
         error!("could not send data channel! ({e})")
     }
 }
 
-fn handle_data_channel_close(
-    label: &str,
-    id: &u16,
-    event: Event,
-    ready_state: &AsyncCell<bool>
-) {
+fn handle_data_channel_close(label: &str, id: &u16, event: Event, ready_state: &AsyncCell<bool>) {
     ready_state.set(false);
     debug!("Data channel closed ({label}:{id}");
     trace!("event: {event:?}");
 }
 
-fn handle_data_channel_open(
-    label: &str,
-    id: &u16,
-    event: Event,
-    ready_state: &AsyncCell<bool>,
-) {
+fn handle_data_channel_open(label: &str, id: &u16, event: Event, ready_state: &AsyncCell<bool>) {
     ready_state.set(true);
     debug!("Data channel open ({label}:{id})");
     trace!("event: {event:?}");
@@ -224,17 +237,11 @@ fn handle_data_channel_message(
     }
 }
 
-fn handle_data_channel_error(
-    label: &str,
-    id: &u16,
-    event: Event,
-) {
+fn handle_data_channel_error(label: &str, id: &u16, event: Event) {
     error!("Internal error on data channel ({label}:{id}). Error ({event:?})");
 }
 
-fn handle_ice_connection_state_change(
-    connection: &Rc<RtcPeerConnection>
-) {
+fn handle_ice_connection_state_change(connection: &Rc<RtcPeerConnection>) {
     let state = connection.ice_connection_state();
     debug!("ICE connection state has changed: {state:?}");
     if state == RtcIceConnectionState::Failed {
@@ -242,9 +249,7 @@ fn handle_ice_connection_state_change(
     }
 }
 
-fn handle_ice_gathering_state_change(
-    connection: &Rc<RtcPeerConnection>
-) {
+fn handle_ice_gathering_state_change(connection: &Rc<RtcPeerConnection>) {
     let state = connection.ice_gathering_state();
     debug!("ICE gathering state has changed: {state:?}");
 }
@@ -256,7 +261,7 @@ fn handle_ice_candidate(
     let message = if let Some(candidate) = event.candidate() {
         let candidate_init = ICECandidate {
             candidate: candidate.candidate(),
-            sdp_mid:  candidate.sdp_mid(),
+            sdp_mid: candidate.sdp_mid(),
             sdp_mline_index: candidate.sdp_m_line_index(),
             username_fragment: None,
         };
@@ -272,7 +277,7 @@ fn handle_ice_candidate(
 
 fn handle_peer_connection_state_change(
     connection: &Rc<RtcPeerConnection>,
-    peer_state: &Rc<AsyncCell<PeerConnectionState>>
+    peer_state: &Rc<AsyncCell<PeerConnectionState>>,
 ) {
     let state = connection.connection_state();
     if state == RtcPeerConnectionState::Failed {
@@ -294,7 +299,8 @@ impl PeerConnectionBuilder<Wasm> {
         config.peer_identity(Some(&self.config.peer_identity));
 
         // create new connection from config
-        let connection = Rc::new(RtcPeerConnection::new_with_configuration(&config).map_err(js_value_to_error)?);
+        let connection =
+            Rc::new(RtcPeerConnection::new_with_configuration(&config).map_err(js_value_to_error)?);
 
         // create mpsc channels for passing info to/from handlers
         let (candidate_tx, candidate_rx) = local_channel::mpsc::channel::<Option<ICECandidate>>();
@@ -306,24 +312,26 @@ impl PeerConnectionBuilder<Wasm> {
         let peer_connection_state_ptr = peer_connection_state.clone();
         register_leaky_event_handler(
             |f| connection.set_onconnectionstatechange(f),
-            move |_event: JsValue| handle_peer_connection_state_change(&connection_ptr, &peer_connection_state_ptr)
+            move |_event: JsValue| {
+                handle_peer_connection_state_change(&connection_ptr, &peer_connection_state_ptr)
+            },
         );
         // register ice connection state change handler
         let connection_ptr = connection.clone();
         register_leaky_event_handler(
             |f| connection.set_oniceconnectionstatechange(f),
-            move |_event: JsValue| handle_ice_connection_state_change(&connection_ptr)
+            move |_event: JsValue| handle_ice_connection_state_change(&connection_ptr),
         );
         // register ice gathering state change handler
         let connection_ptr = connection.clone();
         register_leaky_event_handler(
             |f| connection.set_onicegatheringstatechange(f),
-            move |_event: JsValue| handle_ice_gathering_state_change(&connection_ptr)
+            move |_event: JsValue| handle_ice_gathering_state_change(&connection_ptr),
         );
         // register ice candidate handler
         register_leaky_event_handler(
             |f| connection.set_onicecandidate(f),
-            move |event| handle_ice_candidate(event, &candidate_tx)
+            move |event| handle_ice_candidate(event, &candidate_tx),
         );
 
         // if an offer is provided, we are an answerer and are receiving the data channel
@@ -335,42 +343,62 @@ impl PeerConnectionBuilder<Wasm> {
                 move |event: RtcDataChannelEvent| {
                     let channel = event.channel();
                     handle_data_channel(channel, &channels_tx);
-                }
+                },
             );
             // set the remote SessionDescription (provided by remote peer via external signalling)
             let mut remote_desc_dict = RtcSessionDescriptionInit::new(offer.sdp_type.into());
             remote_desc_dict.sdp(&offer.sdp);
             let js_promise = connection.set_remote_description(&remote_desc_dict);
-            JsFuture::from(js_promise).await.map_err(js_value_to_error)?;
+            JsFuture::from(js_promise)
+                .await
+                .map_err(js_value_to_error)?;
             // create answer
             let js_promise = connection.create_answer();
-            let js_value = JsFuture::from(js_promise).await.map_err(js_value_to_error)?;
-            let js_value = Reflect::get(&js_value, &JsValue::from_str("sdp")).map_err(js_value_to_error)?;
+            let js_value = JsFuture::from(js_promise)
+                .await
+                .map_err(js_value_to_error)?;
+            let js_value =
+                Reflect::get(&js_value, &JsValue::from_str("sdp")).map_err(js_value_to_error)?;
             let answer_sdp = js_value.as_string().unwrap();
             let mut answer = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
             answer.sdp(&answer_sdp);
             (answer, false)
         } else {
             // create channels from options (we are offering)
-            for (index, (label_prefix, channel_options)) in self.channel_options.iter().enumerate() {
+            for (index, (label_prefix, channel_options)) in self.channel_options.iter().enumerate()
+            {
                 let mut data_channel_dict = RtcDataChannelInit::new();
-                if let Some(o) = channel_options.ordered { data_channel_dict.ordered(o); }
-                if let Some(m) = channel_options.max_packet_life_time { data_channel_dict.max_packet_life_time(m); }
-                if let Some(r) = channel_options.max_retransmits { data_channel_dict.max_retransmits(r); }
-                if let Some(p) = &channel_options.protocol { data_channel_dict.protocol(p); }
+                if let Some(o) = channel_options.ordered {
+                    data_channel_dict.ordered(o);
+                }
+                if let Some(m) = channel_options.max_packet_life_time {
+                    data_channel_dict.max_packet_life_time(m);
+                }
+                if let Some(r) = channel_options.max_retransmits {
+                    data_channel_dict.max_retransmits(r);
+                }
+                if let Some(p) = &channel_options.protocol {
+                    data_channel_dict.protocol(p);
+                }
                 if let Some(id) = channel_options.negotiated {
                     data_channel_dict.negotiated(true);
                     data_channel_dict.id(id);
                 } else {
                     data_channel_dict.id(index as u16);
                 }
-                let channel = connection.create_data_channel_with_data_channel_dict(&format!("{label_prefix}{index}"), &data_channel_dict);
+                let channel = connection.create_data_channel_with_data_channel_dict(
+                    &format!("{label_prefix}{index}"),
+                    &data_channel_dict,
+                );
                 handle_data_channel(channel, &channels_tx);
             }
             // create offer
             let js_promise = connection.create_offer();
-            let js_value = JsFuture::from(js_promise).await.map_err(js_value_to_error)?;
-            let js_value = Reflect::get(&js_value, &JsValue::from_str("sdp")).map_err(js_value_to_error)?;
+            let js_value = JsFuture::from(js_promise)
+                .await
+                .map_err(js_value_to_error)?;
+            let js_value =
+                Reflect::get(&js_value, &JsValue::from_str("sdp")).map_err(js_value_to_error)?;
             let offer_sdp = js_value.as_string().unwrap();
             let mut offer = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
             offer.sdp(&offer_sdp);
@@ -379,9 +407,17 @@ impl PeerConnectionBuilder<Wasm> {
 
         // sets the local SessionDescription (offer/answer), and starts UDP listeners
         let js_promise = connection.set_local_description(&desc);
-        JsFuture::from(js_promise).await.map_err(js_value_to_error)?;
+        JsFuture::from(js_promise)
+            .await
+            .map_err(js_value_to_error)?;
 
-        Ok(PeerConnection { is_offerer, inner: connection, peer_connection_state, channels_rx, candidate_rx })
+        Ok(PeerConnection {
+            is_offerer,
+            inner: connection,
+            peer_connection_state,
+            channels_rx,
+            candidate_rx,
+        })
     }
 }
 

@@ -3,7 +3,7 @@
 //! Contains all JustWebRTC platform independent types.
 //! These types are largely extracted from webrtc-rs.
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// ICECandidate is used to serialize ice candidates
 ///

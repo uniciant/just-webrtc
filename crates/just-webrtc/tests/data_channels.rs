@@ -2,19 +2,22 @@ use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use log::debug;
 
-use just_webrtc::{types::DataChannelOptions, PeerConnectionBuilder, PeerConnectionExt, DataChannelExt};
+use just_webrtc::{
+    types::DataChannelOptions, DataChannelExt, PeerConnectionBuilder, PeerConnectionExt,
+};
 
 async fn test_data_channel() -> Result<()> {
     // create local peer connection from channel options
     debug!("create local peer connection");
-    let channel_options = vec![
-        (format!("test_channel_"), DataChannelOptions::default())
-    ];
+    let channel_options = vec![(format!("test_channel_"), DataChannelOptions::default())];
     let mut local_peer_connection = PeerConnectionBuilder::new()
         .with_channel_options(channel_options)?
-        .build().await?;
+        .build()
+        .await?;
     // output offer and candidates for remote peer
-    let offer = local_peer_connection.get_local_description().await
+    let offer = local_peer_connection
+        .get_local_description()
+        .await
         .ok_or(anyhow!("could not get local description! (offer)"))?;
     let candidates = local_peer_connection.collect_ice_candidates().await?;
 
@@ -24,10 +27,15 @@ async fn test_data_channel() -> Result<()> {
     debug!("create remote peer connection");
     let mut remote_peer_connection = PeerConnectionBuilder::new()
         .with_remote_offer(Some(offer))?
-        .build().await?;
-    remote_peer_connection.add_ice_candidates(candidates).await?;
+        .build()
+        .await?;
+    remote_peer_connection
+        .add_ice_candidates(candidates)
+        .await?;
     // output answer and candidates for local peer
-    let answer = remote_peer_connection.get_local_description().await
+    let answer = remote_peer_connection
+        .get_local_description()
+        .await
         .ok_or(anyhow!("could not get remote description! (answer)"))?;
     let candidates = remote_peer_connection.collect_ice_candidates().await?;
 
@@ -49,7 +57,6 @@ async fn test_data_channel() -> Result<()> {
     debug!("wait for data channels to be ready");
     local_channel.wait_ready().await;
     remote_channel.wait_ready().await;
-
 
     // send/recv data from local to remote
     debug!("send/recv data from local to remote");

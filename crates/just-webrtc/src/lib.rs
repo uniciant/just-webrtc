@@ -11,8 +11,8 @@ use platform::Platform;
 pub mod platform;
 pub mod types;
 
+use platform::{Channel, Error};
 use types::{DataChannelOptions, ICECandidate, ICEServer, PeerConfiguration, SessionDescription};
-use platform::{Error, Channel};
 
 #[cfg_attr(not(target_arch = "wasm32"), trait_variant::make(Send))]
 #[cfg_attr(target_arch = "wasm32", allow(async_fn_in_trait))]
@@ -66,7 +66,7 @@ pub struct PeerConnectionBuilder<P: Platform> {
     config: PeerConfiguration,
     outgoing_buffer: usize,
     remote_offer: Option<SessionDescription>,
-    channel_options: Vec<(String, DataChannelOptions)>
+    channel_options: Vec<(String, DataChannelOptions)>,
 }
 
 impl<P: Platform> Default for PeerConnectionBuilder<P> {
@@ -114,7 +114,10 @@ impl<P: Platform> PeerConnectionBuilder<P> {
     /// Provide an Offer as created by a remote peer
     ///
     /// This option is mutually exclusive with the `with_channel_` settings.
-    pub fn with_remote_offer(mut self, set: Option<SessionDescription>) -> Result<Self, PeerConnectionBuilderError> {
+    pub fn with_remote_offer(
+        mut self,
+        set: Option<SessionDescription>,
+    ) -> Result<Self, PeerConnectionBuilderError> {
         if self.channel_options.is_empty() {
             self.remote_offer = set;
             Ok(self)
@@ -126,7 +129,10 @@ impl<P: Platform> PeerConnectionBuilder<P> {
     /// Provide options for initial data channel creation (as an offerer)
     ///
     /// This option is mutually exclusive with `with_remote_offer`.
-    pub fn with_channel_options(mut self, set: Vec<(String, DataChannelOptions)>) -> Result<Self, PeerConnectionBuilderError> {
+    pub fn with_channel_options(
+        mut self,
+        set: Vec<(String, DataChannelOptions)>,
+    ) -> Result<Self, PeerConnectionBuilderError> {
         if self.remote_offer.is_none() {
             self.channel_options = set;
             Ok(self)

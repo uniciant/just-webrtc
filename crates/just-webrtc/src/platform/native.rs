@@ -8,13 +8,37 @@ use flume::{Receiver, RecvError, Sender};
 use log::{debug, error, trace};
 use webrtc::{
     api::APIBuilder,
-    data_channel::{data_channel_init::RTCDataChannelInit, data_channel_message::DataChannelMessage, RTCDataChannel},
-    ice_transport::{ice_candidate::{RTCIceCandidate, RTCIceCandidateInit}, ice_connection_state::RTCIceConnectionState, ice_credential_type::RTCIceCredentialType, ice_gatherer_state::RTCIceGathererState, ice_server::RTCIceServer},
-    peer_connection::{configuration::RTCConfiguration, peer_connection_state::RTCPeerConnectionState, policy::{bundle_policy::RTCBundlePolicy, ice_transport_policy::RTCIceTransportPolicy, rtcp_mux_policy::RTCRtcpMuxPolicy}, sdp::{sdp_type::RTCSdpType, session_description::RTCSessionDescription}, RTCPeerConnection},
+    data_channel::{
+        data_channel_init::RTCDataChannelInit, data_channel_message::DataChannelMessage,
+        RTCDataChannel,
+    },
+    ice_transport::{
+        ice_candidate::{RTCIceCandidate, RTCIceCandidateInit},
+        ice_connection_state::RTCIceConnectionState,
+        ice_credential_type::RTCIceCredentialType,
+        ice_gatherer_state::RTCIceGathererState,
+        ice_server::RTCIceServer,
+    },
+    peer_connection::{
+        configuration::RTCConfiguration,
+        peer_connection_state::RTCPeerConnectionState,
+        policy::{
+            bundle_policy::RTCBundlePolicy, ice_transport_policy::RTCIceTransportPolicy,
+            rtcp_mux_policy::RTCRtcpMuxPolicy,
+        },
+        sdp::{sdp_type::RTCSdpType, session_description::RTCSessionDescription},
+        RTCPeerConnection,
+    },
 };
 
-use crate::{types::{BundlePolicy, ICECandidate, ICECredentialType, ICEServer, ICETransportPolicy, PeerConfiguration, PeerConnectionState, RTCPMuxPolicy, SDPType, SessionDescription}, DataChannelExt, DataChannelOptions, PeerConnectionBuilder, PeerConnectionExt};
 use super::Platform;
+use crate::{
+    types::{
+        BundlePolicy, ICECandidate, ICECredentialType, ICEServer, ICETransportPolicy,
+        PeerConfiguration, PeerConnectionState, RTCPMuxPolicy, SDPType, SessionDescription,
+    },
+    DataChannelExt, DataChannelOptions, PeerConnectionBuilder, PeerConnectionExt,
+};
 
 /// Native platform marker
 #[derive(Debug)]
@@ -113,7 +137,9 @@ impl PeerConnectionExt for PeerConnection {
     }
 
     async fn set_remote_description(&self, remote_answer: SessionDescription) -> Result<(), Error> {
-        self.inner.set_remote_description(remote_answer.try_into()?).await?;
+        self.inner
+            .set_remote_description(remote_answer.try_into()?)
+            .await?;
         Ok(())
     }
 
@@ -122,10 +148,7 @@ impl PeerConnectionExt for PeerConnection {
     }
 }
 
-fn handle_data_channel(
-    channel: Arc<RTCDataChannel>,
-    channels_tx: &Sender<Channel>,
-) {
+fn handle_data_channel(channel: Arc<RTCDataChannel>, channels_tx: &Sender<Channel>) {
     let label = channel.label().to_string();
     let id = channel.id();
 
@@ -155,7 +178,11 @@ fn handle_data_channel(
     }));
 
     // push channel & receiver to list
-    let channel = Channel { inner: channel, rx, ready_state };
+    let channel = Channel {
+        inner: channel,
+        rx,
+        ready_state,
+    };
 
     if let Err(e) = channels_tx.send(channel) {
         error!("could not send data channel! ({e})")
@@ -176,7 +203,7 @@ fn handle_data_channel_message(
     label: &str,
     id: &u16,
     incoming_tx: &Sender<Bytes>,
-    message: DataChannelMessage
+    message: DataChannelMessage,
 ) {
     trace!("Data channel received message ({label}:{id})");
     if let Err(e) = incoming_tx.send(message.data) {
@@ -204,9 +231,7 @@ fn handle_ice_candidate(
 ) {
     let message = if let Some(candidate) = candidate {
         match candidate.to_json() {
-            Ok(candidate_init) => {
-                Some(candidate_init.into())
-            },
+            Ok(candidate_init) => Some(candidate_init.into()),
             Err(e) => {
                 error!("failed to serialise ice candidate ({e})");
                 return;
@@ -223,7 +248,7 @@ fn handle_ice_candidate(
 
 fn handle_peer_connection_state_change(
     state: RTCPeerConnectionState,
-    peer_state: &AsyncCell<PeerConnectionState>
+    peer_state: &AsyncCell<PeerConnectionState>,
 ) {
     if state == RTCPeerConnectionState::Failed {
         error!("Peer connection failed");
@@ -239,7 +264,8 @@ impl PeerConnectionBuilder<Native> {
         // create new connection from the api and config
         let api = APIBuilder::default().build();
 
-        let connection: RTCPeerConnection = api.new_peer_connection(self.config.clone().into()).await?;
+        let connection: RTCPeerConnection =
+            api.new_peer_connection(self.config.clone().into()).await?;
 
         // create channels for passing info to/from handlers
         let (candidate_tx, candidate_rx) = flume::unbounded::<Option<ICECandidate>>();
@@ -279,10 +305,13 @@ impl PeerConnectionBuilder<Native> {
             let answer = connection.create_answer(None).await?;
             (answer, false)
         } else {
-            for (index, (label_prefix, channel_options)) in self.channel_options.iter().enumerate() {
+            for (index, (label_prefix, channel_options)) in self.channel_options.iter().enumerate()
+            {
                 let options = Some(RTCDataChannelInit::from(channel_options.clone()));
                 // create channels from options (we are offering)
-                let data_channel = connection.create_data_channel(&format!("{label_prefix}{index}"), options).await?;
+                let data_channel = connection
+                    .create_data_channel(&format!("{label_prefix}{index}"), options)
+                    .await?;
                 handle_data_channel(data_channel, &channels_tx);
             }
             // create offer
@@ -293,7 +322,13 @@ impl PeerConnectionBuilder<Native> {
         // sets the local SessionDescription (offer/answer) and start the UDP listeners
         connection.set_local_description(desc).await?;
 
-        Ok(PeerConnection { is_offerer, inner: connection, peer_connection_state, channels_rx, candidate_rx })
+        Ok(PeerConnection {
+            is_offerer,
+            inner: connection,
+            peer_connection_state,
+            channels_rx,
+            candidate_rx,
+        })
     }
 }
 
@@ -347,7 +382,7 @@ impl TryFrom<SessionDescription> for RTCSessionDescription {
                 out.sdp = value.sdp;
                 out.sdp_type = value.sdp_type.into();
                 Ok(out)
-            },
+            }
         }
     }
 }
@@ -356,7 +391,7 @@ impl From<RTCSessionDescription> for SessionDescription {
     fn from(value: RTCSessionDescription) -> Self {
         Self {
             sdp: value.sdp,
-            sdp_type: value.sdp_type.into()
+            sdp_type: value.sdp_type.into(),
         }
     }
 }
