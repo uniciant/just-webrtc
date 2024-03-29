@@ -32,10 +32,18 @@ All features [`client`, `server` and `server_web`] are enabled by default.
 
 The below example demonstrates how you might integrate a `just-webrtc-signalling` client with the WebRTC implementation of your choice.
 
+NOTE: for web clients, you will need to disable the `server` and `server-web` features, as these are native only:
+```toml
+[dependencies]
+just-webrtc-signalling = { version = "0.1", default-features = false, features = ["client"] }
+```
+
 For complete examples, using `just-webrtc` as the WebRTC implementation, see the [**Examples**](https://github.com/uniciant/just-webrtc/tree/main/examples) in the repository.
 
 ```rust
 use anyhow::Result;
+use futures_util::FutureExt;
+
 use just_webrtc_signalling::client::{RtcSignallingClient, SignalSet};
 
 /// run all client signalling concurrently
@@ -62,19 +70,11 @@ async fn run_peer(server_address: String) -> Result<()> {
         receive_offer_fn,
         remote_sig_cplt_fn
     ).await?;
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct MySessionDescription {
-    // serializable offer/answer description
-}
-#[derive(serde::Serialize, serde::Deserialize)]
-struct MyICECandidates {
-    // serializable ICE candidate information
+    Ok(())
 }
 
 // specify your WebRTC implementation's serializable session description and ICE candidate types
-type MySignalSet = SignalSet<MySessionDescription, MyICECandidates>;
+type MySignalSet = SignalSet<String, String>;
 
 /// implement create offer callback (called by the signalling client to create an offer)
 async fn create_offer(remote_id: u64) -> Result<MySignalSet> {
@@ -82,8 +82,8 @@ async fn create_offer(remote_id: u64) -> Result<MySignalSet> {
     // Generating an offer and ICE candidates and returning them.
     // The signalling client will deliver the signal to the remote peer with the corresponding `remote_id`
     let offer = MySignalSet {
-        desc: MySessionDescription {},
-        candidates: MyICECandidates {},
+        desc: String::new(),
+        candidates: String::new(),
         remote_id,
     };
     Ok(offer)
@@ -108,10 +108,10 @@ async fn receive_offer(offer_set: MySignalSet) -> Result<MySignalSet> {
     // Generating an answer and ICE candidates and returning them.
     // The signalling client will deliver the signal to the remote peer with the corresponding `remote_id`
     let answer = MySignalSet {
-        desc: MySessionDescription {},
-        candidates: MyICECandidates {},
+        desc: String::new(),
+        candidates: String::new(),
         remote_id: offer_set.remote_id,
-    }
+    };
     Ok(answer)
 }
 
@@ -137,8 +137,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use just_webrtc_signalling::{server::Signalling, DEFAULT_NATIVE_SERVER_ADDR, DEFAULT_WEB_SERVER_ADDR};
 
-#[tokio::main]
-async fn main() -> Result<()> {
+async fn serve() -> Result<()> {
     // create shared mapped signalling channels
     let signalling = Arc::new(Signalling::new());
     // create service futures
