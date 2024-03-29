@@ -18,7 +18,6 @@ bytes = "1.5"
 serde = "1.0"
 log = "0.4.20"
 thiserror = "1.0"
-trait-variant = "0.1.2"
 async_cell = "0.2.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -50,6 +49,7 @@ local-channel = "0.1.5"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 webrtc = "0.10"
+trait-variant = "0.1.2"
 flume = { version = "0.11.0", default-features = false, features = ["async"] }
 
 [dev-dependencies]
