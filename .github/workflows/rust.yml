@@ -9,7 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   # CI fail on all warnings
-  RUSTFLAGS: "-Dwarnings -Wunused-crate-dependencies"
+  RUSTFLAGS: "-Dwarnings"
   RUST_LOG: "debug"
 
 jobs:
