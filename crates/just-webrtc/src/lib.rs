@@ -2,6 +2,7 @@
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 #![warn(dead_code)]
+#![cfg_attr(test, allow(unused_crate_dependencies))]
 
 use std::marker::PhantomData;
 
