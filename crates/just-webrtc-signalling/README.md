@@ -1,10 +1,11 @@
 # Just WebRTC Signalling
 
 [![crates.io](https://img.shields.io/crates/v/just-webrtc-signalling?style=flat-square&logo=rust)](https://crates.io/crates/just-webrtc-signalling)
+[![documentation](https://docs.rs/just-webrtc-signalling/badge.svg)](https://docs.rs/just-webrtc-signalling)
 [![license](https://img.shields.io/badge/license-Apache--2.0_OR_MIT-blue?style=flat-square)](#license)
 [![build status](https://img.shields.io/github/actions/workflow/status/uniciant/just-webrtc/rust.yml?branch=main&style=flat-square&logo=github)](https://github.com/uniciant/just-webrtc/actions)
 
-Just simple, fast and easy WebRTC full-mesh signalling in Rust.
+Just simple, fast and easy signalling for full-mesh WebRTC connections in Rust.
 
 Provides a TLS secure-able server and a client that is both `native` and `wasm32` compatible.
 
