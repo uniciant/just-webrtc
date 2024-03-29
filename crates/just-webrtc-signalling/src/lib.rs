@@ -23,23 +23,3 @@ pub mod server;
 pub const DEFAULT_NATIVE_SERVER_ADDR: &str = "[::1]:10000";
 /// Default web server address
 pub const DEFAULT_WEB_SERVER_ADDR: &str = "[::1]:10001";
-
-// pb type helpers
-
-impl pb::PeerChange {
-    /// Create new peer change as addition
-    pub fn add(id: u64) -> Self {
-        Self {
-            id,
-            change: pb::Change::PeerChangeAdd as i32,
-        }
-    }
-
-    /// Create new peer change as removal
-    pub fn remove(id: u64) -> Self {
-        Self {
-            id,
-            change: pb::Change::PeerChangeRemove as i32,
-        }
-    }
-}

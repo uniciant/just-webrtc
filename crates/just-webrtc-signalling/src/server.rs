@@ -359,3 +359,23 @@ pub async fn serve_web(
     builder.add_service(rtc_signalling_svc).serve(addr).await?;
     Ok(())
 }
+
+// pb type helpers
+
+impl PeerChange {
+    /// Create new peer change as addition
+    fn add(id: u64) -> Self {
+        Self {
+            id,
+            change: crate::pb::Change::PeerChangeAdd as i32,
+        }
+    }
+
+    /// Create new peer change as removal
+    fn _remove(id: u64) -> Self {
+        Self {
+            id,
+            change: crate::pb::Change::PeerChangeRemove as i32,
+        }
+    }
+}
