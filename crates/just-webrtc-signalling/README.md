@@ -9,7 +9,7 @@ Just simple, fast and easy signalling for full-mesh WebRTC connections in Rust.
 
 Provides a TLS secure-able server and a client that is both `native` and `wasm32` compatible.
 
-This signalling implementation is built around a [`tonic`]("https://github.com/hyperium/tonic") gRPC service. gRPC is leveraged for its efficiency, security, scalability and load balancing. In the future, interoperability may also be used to signal between clients written in different languages.
+This signalling implementation is built around a [`tonic`](https://github.com/hyperium/tonic) gRPC service. gRPC is leveraged for its efficiency, security, scalability and load balancing. In the future, interoperability may also be used to signal between clients written in different languages.
 
 `just-webrtc-signalling` is modular. Use it with [`just-webrtc`](https://crates.io/crates/just-webrtc)... or with any other WebRTC implementation you like!
 
@@ -19,7 +19,7 @@ just-webrtc-signalling = "0.1"
 ```
 
 ## Documentation
-See [docs.rs](https://docs.rs/just-webrtc) for the complete API reference.
+See [docs.rs](https://docs.rs/just-webrtc-signalling) for the complete API reference.
 
 ## Feature flags
 All features [`client`, `server` and `server_web`] are enabled by default.
@@ -128,7 +128,7 @@ async fn remote_sig_cplt(remote_id: u64) -> Result<u64> {
 
 Running a `just-webrtc-signalling` server is simple. Just configure & create the services you need and run concurrently!
 
-You can also add [`server::RtcSignallingService`](#todo) alongside other services on your existing `tonic` servers!
+You can also add `RtcSignallingService` alongside other services on your existing `tonic` servers!
 
 The below example runs two services, one for native clients and one for web clients. The services share common signalling channels to enable cross-platform signalling between web and native.
 
