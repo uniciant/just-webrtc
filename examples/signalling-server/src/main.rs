@@ -1,7 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
-use just_webrtc_signalling::{server::Signalling, DEFAULT_NATIVE_SERVER_ADDR, DEFAULT_WEB_SERVER_ADDR};
+use just_webrtc_signalling::{
+    server::Signalling, DEFAULT_NATIVE_SERVER_ADDR, DEFAULT_WEB_SERVER_ADDR,
+};
 
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -15,13 +17,15 @@ async fn main() -> Result<()> {
     let serve_fut = just_webrtc_signalling::server::serve(
         signalling.clone(),
         DEFAULT_NATIVE_SERVER_ADDR.parse()?,
-        Some(KEEPALIVE_INTERVAL), None,
+        Some(KEEPALIVE_INTERVAL),
+        None,
         None,
     );
     let serve_web_fut = just_webrtc_signalling::server::serve_web(
         signalling,
         DEFAULT_WEB_SERVER_ADDR.parse()?,
-        Some(KEEPALIVE_INTERVAL), None,
+        Some(KEEPALIVE_INTERVAL),
+        None,
         None,
     );
     // run servers concurrently
