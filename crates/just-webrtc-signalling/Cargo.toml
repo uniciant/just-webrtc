@@ -2,6 +2,16 @@
 name = "just-webrtc-signalling"
 version = "0.1.0"
 edition = "2021"
+authors = ["Reece Kibble <reecek@uniciant.com>"]
+categories = ["network-programming", "web-programming", "wasm", "game-development"]
+keywords = ["webrtc", "peer", "wasm", "networking", "peer-to-peer"]
+description = "Just simple, fast and easy signalling for full-mesh WebRTC connections on native and wasm"
+documentation = "https://docs.rs/just-webrtc-signalling"
+repository = "https://github.com/uniciant/just-webrtc/tree/main/crates/just-webrtc-signalling"
+license = "MIT OR Apache-2.0"
+rust-version = "1.75.0"
+readme = "README.md"
+exclude = [".git*"]
 
 [dependencies]
 prost = "0.12.3"
