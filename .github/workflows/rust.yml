@@ -9,7 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   # CI fail on all warnings
-  RUSTFLAGS: "-Dwarnings"
+  RUSTFLAGS: "-Dwarnings -Wunused-crate-dependencies"
   RUST_LOG: "debug"
 
 jobs:
@@ -23,8 +23,8 @@ jobs:
       run: cargo clippy --package just-webrtc --target "wasm32-unknown-unknown"
     - name: Run Clippy WASM just-webrtc-signalling
       run: cargo clippy --package just-webrtc-signalling --target "wasm32-unknown-unknown" --no-default-features --features client
-    - name: Run Clippy WASM examples/peer
-      run: cargo clippy --package peer --target "wasm32-unknown-unknown"
+    - name: Run Clippy WASM examples/signalling-peer
+      run: cargo clippy --package signalling-peer --target "wasm32-unknown-unknown"
     - name: Check formatting
       run: cargo fmt --all --check
 
@@ -38,8 +38,8 @@ jobs:
       run: cargo doc --no-deps --package just-webrtc --target "wasm32-unknown-unknown"
     - name: Doc WASM just-webrtc-signalling
       run: cargo doc --no-deps --package just-webrtc-signalling --target "wasm32-unknown-unknown" --no-default-features --features client
-    - name: Doc WASM examples/peer
-      run: cargo doc --no-deps --package peer --target "wasm32-unknown-unknown"
+    - name: Doc WASM examples/signalling-peer
+      run: cargo doc --no-deps --package signalling-peer --target "wasm32-unknown-unknown"
 
 
   build:
@@ -52,8 +52,8 @@ jobs:
       run: cargo build --package just-webrtc --target "wasm32-unknown-unknown"
     - name: Build WASM just-webrtc-signaling
       run: cargo build --package just-webrtc-signalling --target "wasm32-unknown-unknown" --no-default-features --features client
-    - name: Build WASM examples/peer
-      run: cargo build --package peer --target "wasm32-unknown-unknown"
+    - name: Build WASM examples/signalling-peer
+      run: cargo build --package signalling-peer --target "wasm32-unknown-unknown"
 
   test:
     runs-on: ubuntu-latest
