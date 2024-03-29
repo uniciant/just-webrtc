@@ -156,7 +156,7 @@ impl SimpleLocalPeerConnection {
         let channel_options = vec![
             // single data channel with the label prefix "simple_channel_"
             (
-                format!("simple_channel_"),
+                "simple_channel_".to_string(),
                 DataChannelOptions {
                     ordered: Some(ordered),
                     ..Default::default()
