@@ -6,12 +6,11 @@
 use std::marker::PhantomData;
 
 use bytes::Bytes;
-use platform::Platform;
 
 pub mod platform;
 pub mod types;
 
-use platform::{Channel, Error};
+use platform::{Channel, Error, PeerConnection, Platform};
 use types::{DataChannelOptions, ICECandidate, ICEServer, PeerConfiguration, SessionDescription};
 
 #[cfg_attr(not(target_arch = "wasm32"), trait_variant::make(Send))]
@@ -139,5 +138,57 @@ impl<P: Platform> PeerConnectionBuilder<P> {
         } else {
             Err(PeerConnectionBuilderError::ConflictingBuildOptions)
         }
+    }
+}
+
+/// Helper for creating a simple 'local' (offerer) peer connection without having to configure the [`PeerConnectionBuilder`]
+///
+/// A "simple peer connection" uses default google STUN/TURN servers, and default policies. It includes a single data channel.
+#[derive(Debug)]
+pub struct SimpleLocalPeerConnection {}
+
+impl SimpleLocalPeerConnection {
+    /// Create new simple local peer connection with a single data channel
+    ///
+    /// Ordered indicates whether the data transmitted across the data channel is allowed to be delivered out of order.
+    pub async fn build(ordered: bool) -> Result<PeerConnection, Error> {
+        // create  simple local peer connection from channel options
+        let channel_options = vec![
+            // single data channel with the label prefix "simple_channel_"
+            (
+                format!("simple_channel_"),
+                DataChannelOptions {
+                    ordered: Some(ordered),
+                    ..Default::default()
+                },
+            ),
+        ];
+        let local_peer_connection = PeerConnectionBuilder::new()
+            .with_channel_options(channel_options)
+            .unwrap()
+            .build()
+            .await?;
+        Ok(local_peer_connection)
+    }
+}
+
+/// Helper for creating a simple 'remote' (answerer) peer connection without having to configure the [`PeerConnectionBuilder`]
+///
+/// A "simple peer connection" uses default google STUN/TURN servers, and default policies. It includes a single data channel.
+#[derive(Debug)]
+pub struct SimpleRemotePeerConnection {}
+
+impl SimpleRemotePeerConnection {
+    /// Create new simple remote peer connection from a received offer
+    ///
+    /// Ordered indicates whether the data transmitted across the data channel is allowed to be delivered out of order.
+    pub async fn build(offer: SessionDescription) -> Result<PeerConnection, Error> {
+        // create remote peer connection from received offer and candidates
+        let remote_peer_connection = PeerConnectionBuilder::new()
+            .with_remote_offer(Some(offer))
+            .unwrap()
+            .build()
+            .await?;
+        Ok(remote_peer_connection)
     }
 }
