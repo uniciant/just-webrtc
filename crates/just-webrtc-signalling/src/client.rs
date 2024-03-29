@@ -6,7 +6,11 @@ use futures_util::{pin_mut, select, stream::FuturesUnordered, FutureExt, StreamE
 use log::{debug, info, trace, warn};
 use tonic::{metadata::MetadataMap, Extensions, Request, Streaming};
 
-use crate::pb::{AdvertiseReq, AnswerListenerReq, AnswerListenerRsp, Change, OfferListenerReq, OfferListenerRsp, PeerChange, PeerDiscoverReq, PeerId, PeerListenerReq, PeerListenerRsp, SignalAnswer, SignalAnswerReq, SignalOffer, SignalOfferReq};
+use crate::pb::{
+    AdvertiseReq, AnswerListenerReq, AnswerListenerRsp, Change, OfferListenerReq, OfferListenerRsp,
+    PeerChange, PeerDiscoverReq, PeerId, PeerListenerReq, PeerListenerRsp, SignalAnswer,
+    SignalAnswerReq, SignalOffer, SignalOfferReq,
+};
 
 /// Default deadline for gRPC method response
 pub const DEFAULT_RESPONSE_DEADLINE: Duration = Duration::from_secs(10);
@@ -56,7 +60,9 @@ pub struct SignalSet<D, C> {
 }
 
 /// Private peer listener helper method
-async fn peer_listener_task(mut listener: Streaming<PeerListenerRsp>) -> ClientResult<(Streaming<PeerListenerRsp>, Vec<PeerChange>)> {
+async fn peer_listener_task(
+    mut listener: Streaming<PeerListenerRsp>,
+) -> ClientResult<(Streaming<PeerListenerRsp>, Vec<PeerChange>)> {
     if let Some(message) = listener.message().await? {
         Ok((listener, message.peer_changes))
     } else {
@@ -65,7 +71,7 @@ async fn peer_listener_task(mut listener: Streaming<PeerListenerRsp>) -> ClientR
 }
 /// Private offer listener helper method
 async fn offer_listener_task<O, C>(
-    mut listener: Streaming<OfferListenerRsp>
+    mut listener: Streaming<OfferListenerRsp>,
 ) -> ClientResult<(Streaming<OfferListenerRsp>, SignalSet<O, C>)>
 where
     O: serde::de::DeserializeOwned,
@@ -75,7 +81,11 @@ where
         if let Some(signal) = message.offer_signal {
             let offer = bincode::deserialize(&signal.offer)?;
             let candidates = bincode::deserialize(&signal.candidates)?;
-            let offer_set = SignalSet { desc: offer, candidates, remote_id: signal.offerer_id };
+            let offer_set = SignalSet {
+                desc: offer,
+                candidates,
+                remote_id: signal.offerer_id,
+            };
             Ok((listener, offer_set))
         } else {
             trace!("received empty offer message.");
@@ -87,7 +97,7 @@ where
 }
 /// Private answer listener helper method
 async fn answer_listener_task<A, C>(
-    mut listener: Streaming<AnswerListenerRsp>
+    mut listener: Streaming<AnswerListenerRsp>,
 ) -> ClientResult<(Streaming<AnswerListenerRsp>, SignalSet<A, C>)>
 where
     A: serde::de::DeserializeOwned,
@@ -97,13 +107,17 @@ where
         if let Some(signal) = message.answer_signal {
             let answer = bincode::deserialize(&signal.answer)?;
             let candidates = bincode::deserialize(&signal.candidates)?;
-            let answer_set = SignalSet { desc: answer, candidates, remote_id: signal.answerer_id };
+            let answer_set = SignalSet {
+                desc: answer,
+                candidates,
+                remote_id: signal.answerer_id,
+            };
             Ok((listener, answer_set))
         } else {
             trace!("received empty answer message.");
             answer_listener_task(listener).boxed_local().await
         }
-    } else  {
+    } else {
         Err(ClientError::ListenerClosed)
     }
 }
@@ -124,7 +138,11 @@ pub struct RtcSignallingClient {
 impl RtcSignallingClient {
     /// Private advertise helper method
     async fn advertise(&mut self) -> Result<u64, tonic::Status> {
-        let request = Request::from_parts(self.grpc_metadata.clone(), Extensions::default(), AdvertiseReq {});
+        let request = Request::from_parts(
+            self.grpc_metadata.clone(),
+            Extensions::default(),
+            AdvertiseReq {},
+        );
         debug!("sending advertise request");
         let response = self.inner.advertise(request).await?;
         let local_id = response.into_inner().local_peer.unwrap().id;
@@ -136,19 +154,31 @@ impl RtcSignallingClient {
         let request = Request::from_parts(
             self.grpc_metadata.clone(),
             Extensions::default(),
-            PeerDiscoverReq { local_peer: Some(PeerId { id }) }
+            PeerDiscoverReq {
+                local_peer: Some(PeerId { id }),
+            },
         );
         debug!("sending peer discover request ({id:#016x})");
         let response = self.inner.peer_discover(request).await?;
         debug!("received peer discover response ({id:#016x})");
-        Ok(response.into_inner().remote_peers.into_iter().map(|peer| peer.id).collect())
+        Ok(response
+            .into_inner()
+            .remote_peers
+            .into_iter()
+            .map(|peer| peer.id)
+            .collect())
     }
     /// Private open peer listener helper method
-    async fn open_peer_listener(&mut self, id: u64) -> Result<Streaming<PeerListenerRsp>, tonic::Status> {
+    async fn open_peer_listener(
+        &mut self,
+        id: u64,
+    ) -> Result<Streaming<PeerListenerRsp>, tonic::Status> {
         let request = Request::from_parts(
             self.grpc_metadata.clone(),
             Extensions::default(),
-            PeerListenerReq { local_peer: Some(PeerId { id }) }
+            PeerListenerReq {
+                local_peer: Some(PeerId { id }),
+            },
         );
         debug!("sending open peer listener request ({id:#016x})");
         let response = self.inner.open_peer_listener(request).await?;
@@ -157,11 +187,16 @@ impl RtcSignallingClient {
         Ok(peer_listener)
     }
     /// Private open offer listener helper method
-    async fn open_offer_listener(&mut self, id: u64) -> Result<Streaming<OfferListenerRsp>, tonic::Status> {
+    async fn open_offer_listener(
+        &mut self,
+        id: u64,
+    ) -> Result<Streaming<OfferListenerRsp>, tonic::Status> {
         let request = Request::from_parts(
             self.grpc_metadata.clone(),
             Extensions::default(),
-            OfferListenerReq { local_peer: Some(PeerId { id }) }
+            OfferListenerReq {
+                local_peer: Some(PeerId { id }),
+            },
         );
         debug!("sending open offer listener request ({id:#016x})");
         let response = self.inner.open_offer_listener(request).await?;
@@ -170,11 +205,16 @@ impl RtcSignallingClient {
         Ok(offer_listener)
     }
     /// Private open answer listener helper method
-    async fn open_answer_listener(&mut self, id: u64) -> Result<Streaming<AnswerListenerRsp>, tonic::Status> {
+    async fn open_answer_listener(
+        &mut self,
+        id: u64,
+    ) -> Result<Streaming<AnswerListenerRsp>, tonic::Status> {
         let request = Request::from_parts(
             self.grpc_metadata.clone(),
             Extensions::default(),
-            AnswerListenerReq { local_peer: Some(PeerId { id }) }
+            AnswerListenerReq {
+                local_peer: Some(PeerId { id }),
+            },
         );
         debug!("sending open answer listener request ({id:#016x})");
         let response = self.inner.open_answer_listener(request).await?;
@@ -199,11 +239,13 @@ impl RtcSignallingClient {
             candidates: bincode::serialize(&candidates)?,
             answer: bincode::serialize(&answer)?,
         };
-        let request = Request::from_parts(self.grpc_metadata.clone(), Extensions::default(),
+        let request = Request::from_parts(
+            self.grpc_metadata.clone(),
+            Extensions::default(),
             SignalAnswerReq {
                 offerer_peer: Some(PeerId { id: remote_id }),
                 answer_signal: Some(answer_signal),
-            }
+            },
         );
         debug!("sending signal answer request ({id:#016x})");
         let _response = self.inner.signal_answer(request).await?;
@@ -227,11 +269,13 @@ impl RtcSignallingClient {
             candidates: bincode::serialize(&candidates)?,
             offer: bincode::serialize(&offer)?,
         };
-        let request = Request::from_parts(self.grpc_metadata.clone(), Extensions::default(),
+        let request = Request::from_parts(
+            self.grpc_metadata.clone(),
+            Extensions::default(),
             SignalOfferReq {
                 answerer_peer: Some(PeerId { id: remote_id }),
                 offer_signal: Some(offer_signal),
-            }
+            },
         );
         // queue signalling of offer
         debug!("sending signal offer request ({id:#016x})");
@@ -244,12 +288,14 @@ impl RtcSignallingClient {
 /// Externally implemented function creating an offer signal
 ///
 /// Returns the resulting offer signal
-pub type CreateOfferFn<O, C, E> = Box<dyn Fn(u64) -> Pin<Box<dyn Future<Output = Result<SignalSet<O, C>, E>>>>>;
+pub type CreateOfferFn<O, C, E> =
+    Box<dyn Fn(u64) -> Pin<Box<dyn Future<Output = Result<SignalSet<O, C>, E>>>>>;
 
 /// Externally implemented function receiving an answer signal
 ///
 /// Returns a result with the remote peer id
-pub type ReceiveAnswerFn<A, C, E> = Box<dyn Fn(SignalSet<A, C>) -> Pin<Box<dyn Future<Output = Result<u64, E>>>>>;
+pub type ReceiveAnswerFn<A, C, E> =
+    Box<dyn Fn(SignalSet<A, C>) -> Pin<Box<dyn Future<Output = Result<u64, E>>>>>;
 
 /// Externally implemented function handling completion of local signalling
 ///
@@ -259,7 +305,8 @@ pub type LocalSigCpltFn<E> = Box<dyn Fn(u64) -> Pin<Box<dyn Future<Output = Resu
 /// Externally implemented function receiving an offer signal and returning an answer
 ///
 /// Returns the resulting answer signal
-pub type ReceiveOfferFn<A, O, C, E> = Box<dyn Fn(SignalSet<O, C>) -> Pin<Box<dyn Future<Output = Result<SignalSet<A, C>, E>>>>>;
+pub type ReceiveOfferFn<A, O, C, E> =
+    Box<dyn Fn(SignalSet<O, C>) -> Pin<Box<dyn Future<Output = Result<SignalSet<A, C>, E>>>>>;
 
 /// Externally implemented function handling completion of remote signalling
 ///
@@ -291,11 +338,13 @@ impl RtcSignallingClient {
                     .domain_name(domain.unwrap())
                     .ca_certificate(ca_certificate);
                 let addr = format!("https://{addr}");
-                tonic::transport::Channel::from_shared(addr).map_err(|_e| ClientError::InvalidUrl)?
+                tonic::transport::Channel::from_shared(addr)
+                    .map_err(|_e| ClientError::InvalidUrl)?
                     .tls_config(tls_config)?
             } else {
                 let addr = format!("http://{addr}");
-                tonic::transport::Channel::from_shared(addr).map_err(|_e| ClientError::InvalidUrl)?
+                tonic::transport::Channel::from_shared(addr)
+                    .map_err(|_e| ClientError::InvalidUrl)?
             };
             let channel = endpoint.connect().await?;
             crate::pb::rtc_signalling_client::RtcSignallingClient::new(channel)
@@ -305,7 +354,11 @@ impl RtcSignallingClient {
             if domain.is_some() || tls_ca_pem.is_some() {
                 warn!("Signalling client domain/tls settings are ignored! Client TLS is handled by the browser.");
             }
-            let addr = if tls_enabled { format!("https://{addr}") } else { format!("http://{addr}") };
+            let addr = if tls_enabled {
+                format!("https://{addr}")
+            } else {
+                format!("http://{addr}")
+            };
             let client = tonic_web_wasm_client::Client::new(addr);
             crate::pb::rtc_signalling_client::RtcSignallingClient::new(client)
         };
