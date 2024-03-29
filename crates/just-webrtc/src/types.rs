@@ -1,4 +1,4 @@
-//! ## Type module
+//! Type module
 //!
 //! Contains all JustWebRTC platform independent types.
 //! These types are largely extracted from webrtc-rs.
