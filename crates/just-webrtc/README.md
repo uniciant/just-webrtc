@@ -29,89 +29,95 @@ See the [`data_channels`](https://github.com/uniciant/just-webrtc/blob/main/crat
 
 For complete examples, including signalling, see the [**Examples**](https://github.com/uniciant/just-webrtc/tree/main/examples) in the repository.
 
-**Peer A - Creating the initial local peer:**
+**Peer A - Local peer (creates the local peer from configuration):**
 
 *Note: "local peer" is WebRTC-speak for the initial peer that creates the offer. Internally this peer is also referred to as the "offerer"*
-```rust,ignore
-// create local peer connection from channel options
-let channel_options = vec![
-    // single data channel with the label prefix "test_channel_"
-    (format!("test_channel_"), DataChannelOptions::default())
-];
-let mut local_peer_connection = PeerConnectionBuilder::new()
-    .with_channel_options(channel_options)?
-    .build().await?;
+```rust
+use anyhow::Result;
+use just_webrtc::{
+    DataChannelExt,
+    PeerConnectionExt,
+    SimpleLocalPeerConnection,
+    types::{SessionDescription, ICECandidate}
+};
 
-// output offer and candidates for remote peer
-let offer = local_peer_connection.get_local_description().await
-    .ok_or(anyhow!("could not get local description! (offer)"))?;
-let candidates = local_peer_connection.collect_ice_candidates().await?;
+async fn run_local_peer() -> Result<()> {
+    // create simple local peer connection with unordered data channel
+    let mut local_peer_connection = SimpleLocalPeerConnection::build(false).await?;
 
-// ... send the offer and the candidates to Peer B via external signalling implementation ...
+    // output offer and candidates for remote peer
+    let offer = local_peer_connection.get_local_description().await.unwrap();
+    let candidates = local_peer_connection.collect_ice_candidates().await?;
+
+    // ... send the offer and the candidates to Peer B via external signalling implementation ...
+    let signalling = (offer, candidates);
+
+    // ... receive the answer and candidates from peer via external signalling implementation ...
+    let (answer, candidates) = signalling;
+
+    // update local peer from received answer and candidates
+    local_peer_connection.set_remote_description(answer).await?;
+    local_peer_connection.add_ice_candidates(candidates).await?;
+
+    // local signalling is complete! we can now wait for a complete connection
+    local_peer_connection.wait_peer_connected().await;
+
+    // receive data channel from local peer
+    let mut local_channel = local_peer_connection.receive_channel().await.unwrap();
+    // wait for data channels to be ready
+    local_channel.wait_ready().await;
+
+    // send data to remote (answerer)
+    local_channel.send(&bytes::Bytes::from("hello remote!")).await?;
+    // recv data from remote (answerer)
+    let recv = local_channel.receive().await.unwrap();
+    assert_eq!(&recv, "hello local!");
+
+    Ok(())
+}
 ```
 
-**Peer B - Creating a remote peer from a received offer:**
+**Peer B - Remote peer (creates the remote peer from a received offer):**
 
 *Note: "remote peer" is WebRTC-speak for the peer that receives an offer from the "local peer". Internally this peer is also referred to as the "answerer"*
-```rust,ignore
-// ... receive the offer and the candidates from Peer A via external signalling implementation ...
+```rust
+use anyhow::Result;
+use just_webrtc::{
+    DataChannelExt,
+    PeerConnectionExt,
+    SimpleRemotePeerConnection,
+    types::{SessionDescription, ICECandidate}
+};
 
-// create remote peer connection from received offer and candidates
-let mut remote_peer_connection = PeerConnectionBuilder::new()
-    .with_remote_offer(Some(offer))?
-    .build().await?;
-remote_peer_connection.add_ice_candidates(candidates).await?;
-// output answer and candidates for local peer
-let answer = remote_peer_connection.get_local_description().await
-    .ok_or(anyhow!("could not get remote description! (answer)"))?;
-let candidates = remote_peer_connection.collect_ice_candidates().await?;
+async fn run_remote_peer(offer: SessionDescription, candidates: Vec<ICECandidate>) -> Result<()> {
+    // ... receive the offer and the candidates from Peer A via external signalling implementation ...
 
-// ... send the answer and the candidates back to Peer B via external signalling implementation ...
+    // create simple remote peer connection from received offer and candidates
+    let mut remote_peer_connection = SimpleRemotePeerConnection::build(offer).await?;
+    remote_peer_connection.add_ice_candidates(candidates).await?;
+    // output answer and candidates for local peer
+    let answer = remote_peer_connection.get_local_description().await.unwrap();
+    let candidates = remote_peer_connection.collect_ice_candidates().await?;
 
-// remote signalling is complete! we can now wait for a complete connection
-remote_peer_connection.wait_peer_connected().await;
+    // ... send the answer and the candidates back to Peer B via external signalling implementation ...
+    let _signalling = (answer, candidates);
 
-```
+    // remote signalling is complete! we can now wait for a complete connection
+    remote_peer_connection.wait_peer_connected().await;
 
-**Peer A - Receiving answer and candidates to update the local peer:**
-```rust,ignore
-// ... receive the answer and candidates from peer via external signalling implementation ...
+    // receive data channel from local and remote peers
+    let mut remote_channel = remote_peer_connection.receive_channel().await.unwrap();
+    // wait for data channels to be ready
+    remote_channel.wait_ready().await;
 
-// update local peer from received answer and candidates
-local_peer_connection.set_remote_description(answer).await?;
-local_peer_connection.add_ice_candidates(candidates).await?;
+    // send/recv data from local (offerer) to remote (answerer)
+    let recv = remote_channel.receive().await.unwrap();
+    assert_eq!(&recv, "hello remote!");
+    // send/recv data from remote (answerer) to local (offerer)
+    remote_channel.send(&bytes::Bytes::from("hello local!")).await?;
 
-// local signalling is complete! we can now wait for a complete connection
-local_peer_connection.wait_peer_connected().await;
-```
-
-**Receiving data channels and transferring data:**
-
-On peer A:
-```rust,ignore
-// receive data channel from local peer
-let mut local_channel = local_peer_connection.receive_channel().await.unwrap();
-// wait for data channels to be ready
-local_channel.wait_ready().await;
-
-// send data to remote (answerer)
-local_channel.send(&Bytes::from("hello remote!")).await?;
-// recv data from remote (answerer)
-let recv = local_channel.receive().await.unwrap();
-assert_eq!(&recv, "hello local!");
-```
-On peer B:
-```rust,ignore
-// receive data channel from local and remote peers
-let mut remote_channel = remote_peer_connection.receive_channel().await.unwrap();
-// wait for data channels to be ready
-remote_channel.wait_ready().await;
-
-// send/recv data from local (offerer) to remote (answerer)
-let recv = remote_channel.receive().await.unwrap();
-assert_eq!(&recv, "hello remote!");
-// send/recv data from remote (answerer) to local (offerer)
-remote_channel.send(&Bytes::from("hello local!")).await?;
+    Ok(())
+}
 ```
 
 ## License
