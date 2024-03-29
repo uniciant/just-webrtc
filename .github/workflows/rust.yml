@@ -17,8 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
-    - name: Prepare
+    - name: Install protoc
       run: sudo apt install -y protobuf-compiler
+    - name: Install rust wasm target
+      run: rustup target add wasm32-unknown-unknown
     - name: Run Clippy Native
       run: cargo clippy
     - name: Run Clippy WASM just-webrtc
@@ -34,6 +36,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
+    - name: Install rust wasm target
+      run: rustup target add wasm32-unknown-unknown
     - name: Doc Native
       run: cargo doc --no-deps
     - name: Doc WASM just-webrtc
@@ -48,8 +52,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
-    - name: Prepare
+    - name: Install protoc
       run: sudo apt install -y protobuf-compiler
+    - name: Install rust wasm target
+      run: rustup target add wasm32-unknown-unknown
     - name: Build
       run: cargo build
     - name: Build WASM just-webrtc
@@ -63,8 +69,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
-    - name: Prepare
+    - name: Install protoc
       run: sudo apt install -y protobuf-compiler
+    - name: Install rust wasm target
+      run: rustup target add wasm32-unknown-unknown
     - name: Run tests Native
       run: cargo test
     - name: Install wasm-pack
