@@ -2,7 +2,7 @@
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 #![warn(dead_code)]
-#![cfg_attr(test, allow(unused_crate_dependencies))]
+#![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
 #[cfg(all(target_arch = "wasm32", feature = "server"))]
 compile_error!("feature \"server\" is not compatible with target \"wasm32\"");
