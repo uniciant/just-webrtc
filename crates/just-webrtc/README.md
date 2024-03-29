@@ -1,6 +1,7 @@
 # Just WebRTC
 
 [![crates.io](https://img.shields.io/crates/v/just-webrtc?style=flat-square&logo=rust)](https://crates.io/crates/just-webrtc)
+[![documentation](https://docs.rs/just-webrtc/badge.svg)](https://docs.rs/just-webrtc)
 [![license](https://img.shields.io/badge/license-Apache--2.0_OR_MIT-blue?style=flat-square)](#license)
 [![build status](https://img.shields.io/github/actions/workflow/status/uniciant/just-webrtc/rust.yml?branch=main&style=flat-square&logo=github)](https://github.com/uniciant/just-webrtc/actions)
 
