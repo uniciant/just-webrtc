@@ -203,7 +203,7 @@ fn main() {
     use just_webrtc_signalling::DEFAULT_WEB_SERVER_ADDR;
     use log::error;
 
-    console_log::init_with_level(log::Level::Trace).unwrap();
+    console_log::init_with_level(log::Level::Debug).unwrap();
     info!("starting web peer!");
     // run locally, detached
     wasm_bindgen_futures::spawn_local(async {
