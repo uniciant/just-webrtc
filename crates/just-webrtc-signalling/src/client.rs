@@ -1,3 +1,5 @@
+//! Just WebRTC Signalling full-mesh client for both `native` and `wasm`
+
 use std::{collections::HashSet, future::Future, pin::Pin, time::Duration};
 
 use futures_util::{pin_mut, select, stream::FuturesUnordered, FutureExt, StreamExt};
@@ -6,25 +8,35 @@ use tonic::{metadata::MetadataMap, Extensions, Request, Streaming};
 
 use crate::pb::{AdvertiseReq, AnswerListenerReq, AnswerListenerRsp, Change, OfferListenerReq, OfferListenerRsp, PeerChange, PeerDiscoverReq, PeerId, PeerListenerReq, PeerListenerRsp, SignalAnswer, SignalAnswerReq, SignalOffer, SignalOfferReq};
 
-pub const DEFAULT_REQUEST_DEADLINE: Duration = Duration::from_secs(10);
+/// Default deadline for gRPC method response
+pub const DEFAULT_RESPONSE_DEADLINE: Duration = Duration::from_secs(10);
 
+/// Signalling client error
 #[derive(thiserror::Error, Debug)]
 pub enum ClientError {
+    /// Bincode encoding/decoding error
     #[error(transparent)]
     Bincode(#[from] bincode::Error),
+    /// Pre-existing peer connection error
     #[error("Pre-existing connection with peer!")]
     PreExistingPeerConnection,
+    /// Listener closed error
     #[error("Listener closed unexpectedly!")]
     ListenerClosed,
+    /// Listener unavailable error
     #[error("Listener unavailable!")]
     ListenerUnavailable,
+    /// Invalid URL error
     #[error("Invalid URL")]
     InvalidUrl,
+    /// Tonic gRPC method error
     #[error(transparent)]
     TonicStatus(#[from] tonic::Status),
+    /// Tonic transport layer error
     #[cfg(not(target_arch = "wasm32"))]
     #[error(transparent)]
     TonicTransport(#[from] tonic::transport::Error),
+    /// Externally provided callback error
     #[error(transparent)]
     ExternalFn(#[from] anyhow::Error),
 }
@@ -33,9 +45,13 @@ pub enum ClientError {
 pub type ClientResult<T> = Result<T, ClientError>;
 
 /// Set of description, candidates and a remote peer ID.
+#[derive(Debug)]
 pub struct SignalSet<D, C> {
+    /// Serializable session description
     pub desc: D,
+    /// Serializable ICE candidates
     pub candidates: C,
+    /// Remote peer ID
     pub remote_id: u64,
 }
 
@@ -95,6 +111,7 @@ where
 /// Just WebRTC `tonic`-based signalling client
 ///
 /// Compatible with both WASM and native.
+#[derive(Debug)]
 pub struct RtcSignallingClient {
     grpc_metadata: MetadataMap,
     #[cfg(not(target_arch = "wasm32"))]
@@ -262,7 +279,7 @@ impl RtcSignallingClient {
     ) -> ClientResult<Self> {
         // create an empty temp request to build timeout metadata
         let mut tmp_req = Request::new(());
-        tmp_req.set_timeout(timeout.unwrap_or(DEFAULT_REQUEST_DEADLINE));
+        tmp_req.set_timeout(timeout.unwrap_or(DEFAULT_RESPONSE_DEADLINE));
         // decompose into parts to get complete grpc metadata
         let (grpc_metadata, _, _) = tmp_req.into_parts();
         // create the client
@@ -300,9 +317,12 @@ impl RtcSignallingClient {
         })
     }
 
-    /// Run signalling client
+    /// Runs the signalling client
     ///
-    /// Concurrent tasks are managed internally
+    /// Operates the signalling chain:
+    /// advertising self, listening for offers/answers, discovering peers, and performing offer/answer signalling.
+    ///
+    /// The externally provided callback functions are called concurrently on the local thread.
     pub async fn run<A, O, C, E>(
         &mut self,
         create_offer_fn: CreateOfferFn<O, C, E>,

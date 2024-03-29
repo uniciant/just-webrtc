@@ -1,4 +1,7 @@
 #![doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))]
+#![warn(missing_docs)]
+#![warn(missing_debug_implementations)]
+#![warn(dead_code)]
 
 #[cfg(all(target_arch = "wasm32", feature = "server"))]
 compile_error!("feature \"server\" is not compatible with target \"wasm32\"");
@@ -14,5 +17,7 @@ pub mod client;
 #[cfg(feature = "server")]
 pub mod server;
 
+/// Default native server address
 pub const DEFAULT_NATIVE_SERVER_ADDR: &str = "[::1]:10000";
+/// Default web server address
 pub const DEFAULT_WEB_SERVER_ADDR: &str = "[::1]:10001";

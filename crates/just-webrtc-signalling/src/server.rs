@@ -1,3 +1,5 @@
+//! Just WebRTC Signalling full-mesh server/services
+
 use std::{collections::HashMap, net::SocketAddr, pin::Pin, sync::{atomic::AtomicU64, Arc}, time::Duration};
 
 use futures_util::{Stream, StreamExt};
@@ -13,19 +15,21 @@ use crate::pb::{
 
 static GENERATOR: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct Listeners {
     offer_listener: RwLock<Option<mpsc::Sender<Result<OfferListenerRsp>>>>,
     answer_listener: RwLock<Option<mpsc::Sender<Result<AnswerListenerRsp>>>>,
 }
 
 /// Mapped signalling channels
+#[derive(Debug)]
 pub struct Signalling {
     peers: RwLock<HashMap<u64, Listeners>>,
     peer_broadcast: broadcast::Sender<Result<PeerListenerRsp>>,
 }
 
 impl Signalling {
+    /// Create new empty signalling channels
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(16);
         Self { peers: RwLock::new(HashMap::new()), peer_broadcast: tx }
@@ -38,11 +42,16 @@ impl Default for Signalling {
     }
 }
 
+/// A JustWebRTC Signalling Service
+///
+/// This service implements robust full-mesh signalling for the creation and management of WebRTC peer-to-peer connections.
+#[derive(Debug)]
 pub struct RtcSignallingService {
     inner: Arc<Signalling>,
 }
 
 impl RtcSignallingService {
+    /// Create new `tonic`-wrapped [`RtcSignallingService`]
     pub fn new_svc(signalling: Arc<Signalling>) -> RtcSignallingServer<RtcSignallingService> {
         RtcSignallingServer::new(RtcSignallingService { inner: signalling })
     }
