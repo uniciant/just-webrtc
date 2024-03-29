@@ -79,7 +79,7 @@ jobs:
       run: cargo test
     - name: Install wasm-pack
       run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-    - name: Run test WASM chrome
-      run: wasm-pack test --headless --chrome
     - name: Run test WASM firefox
-      run: wasm-pack test --headless --firefox
+      run: wasm-pack test --headless --firefox crates/just-webrtc
+    - name: Run test WASM chrome
+      run: wasm-pack test --headless --chrome crates/just-webrtc
