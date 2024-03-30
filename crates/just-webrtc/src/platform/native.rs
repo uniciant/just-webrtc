@@ -73,7 +73,7 @@ impl Debug for Channel {
 }
 
 impl DataChannelExt for Channel {
-    async fn wait_ready(&mut self) {
+    async fn wait_ready(&self) {
         while !(self.ready_state.take().await) {}
     }
 
@@ -107,7 +107,7 @@ pub struct PeerConnection {
 }
 
 impl PeerConnectionExt for PeerConnection {
-    async fn wait_peer_connected(&mut self) {
+    async fn wait_peer_connected(&self) {
         while self.peer_connection_state.take().await != PeerConnectionState::Connected {}
     }
 
