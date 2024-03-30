@@ -1,4 +1,4 @@
-use std::{cell::OnceCell, collections::HashMap, sync::Mutex, time::Duration};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
 
 use anyhow::{anyhow, Result};
 use futures_util::{FutureExt, StreamExt};
@@ -16,21 +16,10 @@ const ECHO_RESPONSE: &str = "I know right! He's literally me.";
 
 // fill signal set generics
 type SignalSet = just_webrtc_signalling::client::SignalSet<SessionDescription, Vec<ICECandidate>>;
-// thread local map for passing peer connections
-thread_local! {
-    static PEER_CONNECTIONS: OnceCell<Mutex<HashMap<u64, PeerConnection>>> = const { OnceCell::new() };
-}
 
-// start echo task on local/remote peer
-async fn peer_echo_task(remote_id: u64) -> Result<u64> {
+async fn peer_echo_task(remote_id: u64, mut peer_connection: PeerConnection) -> Result<u64> {
     info!("started peer echo task. ({remote_id})");
-    let mut peer_connection = PEER_CONNECTIONS
-        .with(|cell| {
-            let peer_connections = cell.get().unwrap();
-            let mut peer_connections = peer_connections.lock().unwrap();
-            peer_connections.remove(&remote_id)
-        })
-        .ok_or(anyhow!("could not get peer connection"))?;
+    // take peer connection from the map
     peer_connection.wait_peer_connected().await;
     let mut channel = peer_connection.receive_channel().await.unwrap();
     channel.wait_ready().await;
@@ -68,7 +57,7 @@ async fn peer_echo_task(remote_id: u64) -> Result<u64> {
     }
 }
 
-async fn create_offer(remote_id: u64) -> Result<SignalSet> {
+async fn create_offer(remote_id: u64) -> Result<(SignalSet, PeerConnection)> {
     let channel_options = vec![(
         format!("rtc_channel_to_{remote_id:#016x}_"),
         DataChannelOptions::default(),
@@ -82,27 +71,15 @@ async fn create_offer(remote_id: u64) -> Result<SignalSet> {
         .await
         .ok_or(anyhow!("could not get local description!"))?;
     let candidates = local_peer_connection.collect_ice_candidates().await?;
-    // add new local peer connection to map
-    PEER_CONNECTIONS.with(|cell| {
-        let peer_connections = cell.get().unwrap();
-        let mut peer_connections = peer_connections.lock().unwrap();
-        if peer_connections
-            .insert(remote_id, local_peer_connection)
-            .is_some()
-        {
-            Err(anyhow!("peer connection already exists"))
-        } else {
-            Ok(())
-        }
-    })?;
-    Ok(SignalSet {
+    let signal = SignalSet {
         desc: offer,
         candidates,
         remote_id,
-    })
+    };
+    Ok((signal, local_peer_connection))
 }
 
-async fn receive_offer(offer_set: SignalSet) -> Result<SignalSet> {
+async fn receive_offer(offer_set: SignalSet) -> Result<(SignalSet, PeerConnection)> {
     let mut remote_peer_connection = PeerConnectionBuilder::new()
         .with_remote_offer(Some(offer_set.desc))?
         .build()
@@ -121,32 +98,14 @@ async fn receive_offer(offer_set: SignalSet) -> Result<SignalSet> {
         candidates,
         remote_id,
     };
-    // add new remote peer connection to map
-    PEER_CONNECTIONS.with(|cell| {
-        let peer_connections = cell.get().unwrap();
-        let mut peer_connections = peer_connections.lock().unwrap();
-        if peer_connections
-            .insert(remote_id, remote_peer_connection)
-            .is_some()
-        {
-            Err(anyhow!("peer connection already exists"))
-        } else {
-            Ok(())
-        }
-    })?;
-    Ok(answer_set)
+    Ok((answer_set, remote_peer_connection))
 }
 
-async fn receive_answer(answer_set: SignalSet) -> Result<u64> {
+async fn receive_answer(
+    answer_set: SignalSet,
+    local_peer_connection: PeerConnection,
+) -> Result<(u64, PeerConnection)> {
     let remote_id = answer_set.remote_id;
-    // take local peer connection from map
-    let local_peer_connection = PEER_CONNECTIONS
-        .with(|cell| {
-            let peer_connections = cell.get().unwrap();
-            let mut peer_connections = peer_connections.lock().unwrap();
-            peer_connections.remove(&remote_id)
-        })
-        .ok_or(anyhow!("could not get local peer connection!"))?;
     // set answer description and add candidates
     local_peer_connection
         .set_remote_description(answer_set.desc)
@@ -154,33 +113,104 @@ async fn receive_answer(answer_set: SignalSet) -> Result<u64> {
     local_peer_connection
         .add_ice_candidates(answer_set.candidates)
         .await?;
-    // return local peer connection map
-    PEER_CONNECTIONS.with(|cell| {
-        let peer_connections = cell.get().unwrap();
-        let mut peer_connections = peer_connections.lock().unwrap();
-        if peer_connections
-            .insert(remote_id, local_peer_connection)
+    Ok((remote_id, local_peer_connection))
+}
+
+/// Peer connection map for passing connections between callback functions
+#[derive(Debug, Default)]
+struct PeerConnectionMap {
+    inner: HashMap<u64, Option<PeerConnection>>,
+}
+
+impl PeerConnectionMap {
+    fn insert(&mut self, id: u64, peer_connection: PeerConnection) -> Result<()> {
+        if self.inner.insert(id, Some(peer_connection)).is_some() {
+            return Err(anyhow!("pre-existing peer ID!"));
+        }
+        Ok(())
+    }
+
+    fn take(&mut self, id: &u64) -> Result<PeerConnection> {
+        self.inner
+            .get_mut(id)
+            .ok_or(anyhow!("peer ID not found!"))?
+            .take()
+            .ok_or(anyhow!("peer connection not found!"))
+    }
+
+    fn place(&mut self, id: &u64, peer_connection: PeerConnection) -> Result<()> {
+        if self
+            .inner
+            .get_mut(id)
+            .ok_or(anyhow!("peer ID not found!"))?
+            .replace(peer_connection)
             .is_some()
         {
-            Err(anyhow!("peer connection already exists"))
-        } else {
-            Ok(())
+            return Err(anyhow!("dropped peer connection!"));
         }
-    })?;
-    Ok(remote_id)
+        Ok(())
+    }
 }
 
 async fn run_peer(addr: &str) -> Result<()> {
-    // initialize peer connections map
-    PEER_CONNECTIONS
-        .with(|cell| cell.set(Mutex::new(HashMap::new())))
-        .map_err(|_e| anyhow!("peer connections `OnceCell` already filled!"))?;
-    // prepare callback functions
-    let create_offer_fn = Box::new(|remote_id| create_offer(remote_id).boxed_local());
-    let receive_answer_fn = Box::new(|answer_set| receive_answer(answer_set).boxed_local());
-    let local_sig_cplt_fn = Box::new(|remote_id| peer_echo_task(remote_id).boxed_local());
-    let receive_offer_fn = Box::new(|offer_set| receive_offer(offer_set).boxed_local());
-    let remote_sig_cplt_fn = Box::new(|remote_id| peer_echo_task(remote_id).boxed_local());
+    // create locally shared peer connections map
+    let peer_connections: Rc<RefCell<PeerConnectionMap>> =
+        Rc::new(RefCell::new(PeerConnectionMap::default()));
+    // prepare create offer callback function
+    let create_offer_fn = |remote_id| {
+        let peer_connections = peer_connections.clone();
+        async move {
+            let (offer, local_peer_connection) = create_offer(remote_id).await?;
+            peer_connections
+                .borrow_mut()
+                .insert(remote_id, local_peer_connection)?;
+            Ok(offer)
+        }
+        .boxed_local()
+    };
+    // prepare receive answer callback function
+    let receive_answer_fn = |answer_set: SignalSet| {
+        let peer_connections = peer_connections.clone();
+        async move {
+            let peer_connection = peer_connections.borrow_mut().take(&answer_set.remote_id)?;
+            let (remote_id, peer_connection) = receive_answer(answer_set, peer_connection).await?;
+            peer_connections
+                .borrow_mut()
+                .place(&remote_id, peer_connection)?;
+            Ok(remote_id)
+        }
+        .boxed_local()
+    };
+    // prepare local signalling complete callback function
+    let local_sig_cplt_fn = |remote_id| {
+        let peer_connections = peer_connections.clone();
+        async move {
+            let local_peer_connection = peer_connections.borrow_mut().take(&remote_id)?;
+            peer_echo_task(remote_id, local_peer_connection).await
+        }
+        .boxed_local()
+    };
+    // prepare receive offer callback function
+    let receive_offer_fn = |offer_set| {
+        let peer_connections = peer_connections.clone();
+        async move {
+            let (answer, remote_peer_connection) = receive_offer(offer_set).await?;
+            peer_connections
+                .borrow_mut()
+                .insert(answer.remote_id, remote_peer_connection)?;
+            Ok(answer)
+        }
+        .boxed_local()
+    };
+    // prepare remote signalling complete callback function
+    let remote_sig_cplt_fn = |remote_id| {
+        let peer_connections = peer_connections.clone();
+        async move {
+            let remote_peer_connection = peer_connections.borrow_mut().take(&remote_id)?;
+            peer_echo_task(remote_id, remote_peer_connection).await
+        }
+        .boxed_local()
+    };
     // create signalling client
     let mut signalling_client =
         RtcSignallingClient::connect(addr.to_string(), None, false, None, None).await?;
