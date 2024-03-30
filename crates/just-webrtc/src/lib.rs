@@ -19,7 +19,7 @@ use types::{DataChannelOptions, ICECandidate, ICEServer, PeerConfiguration, Sess
 /// **Platform agnostic WebRTC DataChannel API**
 pub trait DataChannelExt {
     /// Wait for the data channel to become open and ready to transfer data
-    async fn wait_ready(&mut self);
+    async fn wait_ready(&self);
     /// Receive data from the channel
     async fn receive(&mut self) -> Result<Bytes, Error>;
     /// Send data to the channel
@@ -35,7 +35,7 @@ pub trait DataChannelExt {
 /// **Platform agnostic WebRTC PeerConnection API**
 pub trait PeerConnectionExt {
     /// Wait for the peer connection to become connected
-    async fn wait_peer_connected(&mut self);
+    async fn wait_peer_connected(&self);
     /// Receive a data channel from the peer connection
     async fn receive_channel(&mut self) -> Result<Channel, Error>;
     /// Collect all ICE candidates from the peer connection

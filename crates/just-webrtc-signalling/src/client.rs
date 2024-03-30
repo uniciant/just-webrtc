@@ -285,33 +285,30 @@ impl RtcSignallingClient {
     }
 }
 
-/// Externally implemented function creating an offer signal
+/// Return type of externally implemented function creating an offer signal
 ///
-/// Returns the resulting offer signal
-pub type CreateOfferFn<O, C, E> =
-    Box<dyn Fn(u64) -> Pin<Box<dyn Future<Output = Result<SignalSet<O, C>, E>>>>>;
+/// Future returning the resulting offer signal
+pub type CreateOfferFut<O, C, E> = Pin<Box<dyn Future<Output = Result<SignalSet<O, C>, E>>>>;
 
-/// Externally implemented function receiving an answer signal
+/// Return type of externally implemented function receiving an answer signal
+///
+/// Future returning a result with the remote peer id
+pub type ReceiveAnswerFut<E> = Pin<Box<dyn Future<Output = Result<u64, E>>>>;
+
+/// Return type of externally implemented function handling completion of local signalling
+///
+/// Future returning a result with the remote peer id
+pub type LocalSigCpltFut<E> = Pin<Box<dyn Future<Output = Result<u64, E>>>>;
+
+/// Return type of externally implemented function receiving an offer signal and returning an answer
+///
+/// Future returning the resulting answer signal
+pub type ReceiveOfferFut<A, C, E> = Pin<Box<dyn Future<Output = Result<SignalSet<A, C>, E>>>>;
+
+/// Return type of externally implemented function handling completion of remote signalling
 ///
 /// Returns a result with the remote peer id
-pub type ReceiveAnswerFn<A, C, E> =
-    Box<dyn Fn(SignalSet<A, C>) -> Pin<Box<dyn Future<Output = Result<u64, E>>>>>;
-
-/// Externally implemented function handling completion of local signalling
-///
-/// Returns a result with the remote peer id
-pub type LocalSigCpltFn<E> = Box<dyn Fn(u64) -> Pin<Box<dyn Future<Output = Result<u64, E>>>>>;
-
-/// Externally implemented function receiving an offer signal and returning an answer
-///
-/// Returns the resulting answer signal
-pub type ReceiveOfferFn<A, O, C, E> =
-    Box<dyn Fn(SignalSet<O, C>) -> Pin<Box<dyn Future<Output = Result<SignalSet<A, C>, E>>>>>;
-
-/// Externally implemented function handling completion of remote signalling
-///
-/// Returns a result with the remote peer id
-pub type RemoteSigCpltFn<E> = Box<dyn Fn(u64) -> Pin<Box<dyn Future<Output = Result<u64, E>>>>>;
+pub type RemoteSigCpltFut<E> = Pin<Box<dyn Future<Output = Result<u64, E>>>>;
 
 impl RtcSignallingClient {
     /// Create the client and open connections to the signalling service.
@@ -378,11 +375,11 @@ impl RtcSignallingClient {
     /// The externally provided callback functions are called concurrently on the local thread.
     pub async fn run<A, O, C, E>(
         &mut self,
-        create_offer_fn: CreateOfferFn<O, C, E>,
-        receive_answer_fn: ReceiveAnswerFn<A, C, E>,
-        local_sig_cplt_fn: LocalSigCpltFn<E>,
-        receive_offer_fn: ReceiveOfferFn<A, O, C, E>,
-        remote_sig_cplt_fn: RemoteSigCpltFn<E>,
+        create_offer_fn: impl Fn(u64) -> CreateOfferFut<O, C, E>,
+        receive_answer_fn: impl Fn(SignalSet<A, C>) -> ReceiveAnswerFut<E>,
+        local_sig_cplt_fn: impl Fn(u64) -> LocalSigCpltFut<E>,
+        receive_offer_fn: impl Fn(SignalSet<O, C>) -> ReceiveOfferFut<A, C, E>,
+        remote_sig_cplt_fn: impl Fn(u64) -> RemoteSigCpltFut<E>,
     ) -> ClientResult<()>
     where
         A: serde::Serialize + serde::de::DeserializeOwned,
