@@ -50,11 +50,11 @@ use just_webrtc_signalling::client::{RtcSignallingClient, SignalSet};
 /// run all client signalling concurrently
 async fn run_peer(server_address: String) -> Result<()> {
     // prepare callback functions
-    let create_offer_fn = Box::new(|remote_id| create_offer(remote_id).boxed_local());
-    let receive_answer_fn = Box::new(|answer_set| receive_answer(answer_set).boxed_local());
-    let local_sig_cplt_fn = Box::new(|remote_id| local_sig_cplt(remote_id).boxed_local());
-    let receive_offer_fn = Box::new(|offer_set| receive_offer(offer_set).boxed_local());
-    let remote_sig_cplt_fn = Box::new(|remote_id| remote_sig_cplt(remote_id).boxed_local());
+    let create_offer_fn = |remote_id| create_offer(remote_id).boxed_local();
+    let receive_answer_fn = |answer_set| receive_answer(answer_set).boxed_local();
+    let local_sig_cplt_fn = |remote_id| local_sig_cplt(remote_id).boxed_local();
+    let receive_offer_fn = |offer_set| receive_offer(offer_set).boxed_local();
+    let remote_sig_cplt_fn = |remote_id| remote_sig_cplt(remote_id).boxed_local();
     // create signalling client
     let mut signalling_client = RtcSignallingClient::connect(
         server_address,
