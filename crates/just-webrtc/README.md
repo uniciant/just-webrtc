@@ -53,7 +53,7 @@ async fn run_local_peer() -> Result<()> {
     // ... send the offer and the candidates to Peer B via external signalling implementation ...
     let signalling = (offer, candidates);
 
-    // ... receive the answer and candidates from peer via external signalling implementation ...
+    // ... receive the answer and candidates from Peer B via external signalling implementation ...
     let (answer, candidates) = signalling;
 
     // update local peer from received answer and candidates
@@ -100,7 +100,7 @@ async fn run_remote_peer(offer: SessionDescription, candidates: Vec<ICECandidate
     let answer = remote_peer_connection.get_local_description().await.unwrap();
     let candidates = remote_peer_connection.collect_ice_candidates().await?;
 
-    // ... send the answer and the candidates back to Peer B via external signalling implementation ...
+    // ... send the answer and the candidates back to Peer A via external signalling implementation ...
     let _signalling = (answer, candidates);
 
     // remote signalling is complete! we can now wait for a complete connection
