@@ -213,7 +213,7 @@ async fn run_peer(addr: &str) -> Result<()> {
     };
     // create signalling client
     let mut signalling_client =
-        RtcSignallingClient::connect(addr.to_string(), None, false, None, None).await?;
+        RtcSignallingClient::new(addr.to_string(), None, false, None, None)?;
     // run signalling client
     signalling_client
         .run(
