@@ -311,10 +311,10 @@ pub type ReceiveOfferFut<A, C, E> = Pin<Box<dyn Future<Output = Result<SignalSet
 pub type RemoteSigCpltFut<E> = Pin<Box<dyn Future<Output = Result<u64, E>>>>;
 
 impl RtcSignallingClient {
-    /// Create the client and open connections to the signalling service.
+    /// Configure and create a signalling client
     ///
     /// Returns resulting signalling client
-    pub async fn connect(
+    pub fn new(
         addr: String,
         timeout: Option<Duration>,
         tls_enabled: bool,
@@ -342,8 +342,9 @@ impl RtcSignallingClient {
                 let addr = format!("http://{addr}");
                 tonic::transport::Channel::from_shared(addr)
                     .map_err(|_e| ClientError::InvalidUrl)?
-            };
-            let channel = endpoint.connect().await?;
+            }
+            .connect_timeout(timeout.unwrap_or(DEFAULT_RESPONSE_DEADLINE));
+            let channel = endpoint.connect_lazy();
             crate::pb::rtc_signalling_client::RtcSignallingClient::new(channel)
         };
         #[cfg(target_arch = "wasm32")]
