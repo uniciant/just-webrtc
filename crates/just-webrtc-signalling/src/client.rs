@@ -18,26 +18,15 @@ use crate::pb::{
 /// Default deadline for gRPC method response (10 seconds)
 pub const DEFAULT_RESPONSE_DEADLINE: Duration = Duration::from_secs(10);
 
-/// Set of description, candidates and a remote peer ID.
-#[derive(Debug)]
-pub struct SignalSet<D, C> {
-    /// Serializable session description
-    pub desc: D,
-    /// Serializable ICE candidates
-    pub candidates: C,
-    /// Remote peer ID
-    pub remote_id: u64,
-}
-
 /// Signalling state machine states
 enum SignallingState<A, O, C> {
     PeerListener(Streaming<PeerListenerRsp>, Vec<PeerChange>),
-    OfferListener(Streaming<OfferListenerRsp>, SignalSet<O, C>),
-    AnswerListener(Streaming<AnswerListenerRsp>, SignalSet<A, C>),
-    CreateOffer(SignalSet<O, C>),
+    OfferListener(Streaming<OfferListenerRsp>, u64, (O, C)),
+    AnswerListener(Streaming<AnswerListenerRsp>, u64, (A, C)),
+    CreateOffer(u64, (O, C)),
     ReceiveAnswer(u64),
     LocalSigCplt(u64),
-    ReceiveOffer(SignalSet<A, C>),
+    ReceiveOffer(u64, (A, C)),
     RemoteSigCplt(u64),
 }
 
@@ -97,12 +86,7 @@ where
         if let Some(signal) = message.offer_signal {
             let offer = bincode::deserialize(&signal.offer)?;
             let candidates = bincode::deserialize(&signal.candidates)?;
-            let offer_set = SignalSet {
-                desc: offer,
-                candidates,
-                remote_id: signal.offerer_id,
-            };
-            Ok(SignallingState::OfferListener(listener, offer_set))
+            Ok(SignallingState::OfferListener(listener, signal.offerer_id, (offer, candidates)))
         } else {
             trace!("received empty offer message.");
             offer_listener_task(listener).boxed_local().await
@@ -123,12 +107,7 @@ where
         if let Some(signal) = message.answer_signal {
             let answer = bincode::deserialize(&signal.answer)?;
             let candidates = bincode::deserialize(&signal.candidates)?;
-            let answer_set = SignalSet {
-                desc: answer,
-                candidates,
-                remote_id: signal.answerer_id,
-            };
-            Ok(SignallingState::AnswerListener(listener, answer_set))
+            Ok(SignallingState::AnswerListener(listener, signal.answerer_id, (answer, candidates)))
         } else {
             trace!("received empty answer message.");
             answer_listener_task(listener).boxed_local().await
@@ -138,46 +117,22 @@ where
     }
 }
 
-/// Return type of externally implemented function creating an offer signal
-///
-/// Future returning the resulting offer signal
-pub type CreateOfferFut<O, C, E> = Pin<Box<dyn Future<Output = Result<SignalSet<O, C>, E>>>>;
-
-/// Return type of externally implemented function receiving an answer signal
-///
-/// Future returning a result with the remote peer id
-pub type ReceiveAnswerFut<E> = Pin<Box<dyn Future<Output = Result<u64, E>>>>;
-
-/// Return type of externally implemented function handling completion of local signalling
-///
-/// Future returning a result with the remote peer id
-pub type LocalSigCpltFut<E> = Pin<Box<dyn Future<Output = Result<u64, E>>>>;
-
-/// Return type of externally implemented function receiving an offer signal and returning an answer
-///
-/// Future returning the resulting answer signal
-pub type ReceiveOfferFut<A, C, E> = Pin<Box<dyn Future<Output = Result<SignalSet<A, C>, E>>>>;
-
-/// Return type of externally implemented function handling completion of remote signalling
-///
-/// Returns a result with the remote peer id
-pub type RemoteSigCpltFut<E> = Pin<Box<dyn Future<Output = Result<u64, E>>>>;
-
 /// Private signalling state machine future
 type SignallingStateFut<A, O, C> = Pin<Box<dyn Future<Output = ClientResult<SignallingState<A, O, C>>>>>;
+
 /// A Just WebRTC Signalling peer
 pub struct RtcSignallingPeer<A, O, C> {
     local_id: u64,
     discovered_peers: BTreeSet<u64>,
     first_discovery: bool,
     // wrapped callback functions
-    create_offer_task: Box<dyn Fn(u64) -> SignallingStateFut<A, O, C>>,
-    receive_answer_task: Box<dyn Fn(SignalSet<A, C>) -> SignallingStateFut<A, O, C>>,
-    local_sig_cplt_task: Box<dyn Fn(u64) -> SignallingStateFut<A, O, C>>,
-    receive_offer_task: Box<dyn Fn(SignalSet<O, C>) -> SignallingStateFut<A, O, C>>,
-    remote_sig_cplt_task: Box<dyn Fn(u64) -> SignallingStateFut<A, O, C>>,
+    create_offer_task: Box<dyn FnMut(u64) -> SignallingStateFut<A, O, C>>,
+    receive_answer_task: Box<dyn FnMut(u64, (A, C)) -> SignallingStateFut<A, O, C>>,
+    local_sig_cplt_task: Box<dyn FnMut(u64) -> SignallingStateFut<A, O, C>>,
+    receive_offer_task: Box<dyn FnMut(u64, (O, C)) -> SignallingStateFut<A, O, C>>,
+    remote_sig_cplt_task: Box<dyn FnMut(u64) -> SignallingStateFut<A, O, C>>,
     // queued futures
-    unordered_futs: FuturesUnordered<Pin<Box<dyn Future<Output = ClientResult<SignallingState<A, O, C>>>>>>,
+    unordered_futs: FuturesUnordered<SignallingStateFut<A, O, C>>,
 }
 
 impl<A, O, C> Debug for RtcSignallingPeer<A, O, C> {
@@ -215,116 +170,118 @@ where
             first_discovery: true,
             unordered_futs,
             // default callback tasks
-            create_offer_task: Box::new(|_id| std::future::pending().boxed_local()),
-            receive_answer_task: Box::new(|answer| async move { Ok(SignallingState::ReceiveAnswer(answer.remote_id)) }.boxed_local()),
-            local_sig_cplt_task: Box::new(|id| async move { Ok(SignallingState::LocalSigCplt(id)) }.boxed_local()),
-            receive_offer_task: Box::new(|_offer| std::future::pending().boxed_local()),
-            remote_sig_cplt_task: Box::new(|id| async move { Ok(SignallingState::RemoteSigCplt(id)) }.boxed_local()),
+            create_offer_task: Box::new(|_remote_id| std::future::pending().boxed_local()),
+            receive_answer_task: Box::new(|remote_id, _answer_set| async move { Ok(SignallingState::ReceiveAnswer(remote_id)) }.boxed_local()),
+            local_sig_cplt_task: Box::new(|remote_id| async move { Ok(SignallingState::LocalSigCplt(remote_id)) }.boxed_local()),
+            receive_offer_task: Box::new(|_remote_id, _offer_set| std::future::pending().boxed_local()),
+            remote_sig_cplt_task: Box::new(|remote_id| async move { Ok(SignallingState::RemoteSigCplt(remote_id)) }.boxed_local()),
         }
     }
 
     /// Set callback for handling creation of offer signals
     ///
+    /// `f:` User provided closure which receives a `remote_id`, creates an offer signal, and returns an `(remote_id (offer, candidates))`
     ///
     /// Default: never resolves, callback must be set for functional client!
-    pub fn set_on_create_offer<E>(
-        &mut self,
-        create_offer_fn: &'static impl Fn(u64) -> CreateOfferFut<O, C, E>,
-    ) -> &mut Self
+    pub fn set_on_create_offer<F, Fut, E>(&mut self, mut f: F) -> &mut Self
     where
-        E: 'static,
+        F: FnMut(u64) -> Fut + 'static,
+        Fut: Future<Output = Result<(u64, (O, C)), E>> + 'static,
         ClientError: From<E>
     {
         // wrap callback
-        self.create_offer_task = Box::new(|id| {
-            let f = create_offer_fn(id);
+        self.create_offer_task = Box::new(move |remote_id| {
+            let fut = f(remote_id);
             async {
-                let offer = f.await?;
-                Ok(SignallingState::CreateOffer(offer))
+                let (remote_id, offer_set) = fut.await?;
+                Ok(SignallingState::CreateOffer(remote_id, offer_set))
             }.boxed_local()
         });
         self
     }
     /// Set callback for handling receiving of answer signals
     ///
+    /// `f:` User provided closure which receives `remote_id, (answer, candidates)`, creates an answer signal, and returns the `remote_id`
+    ///
     /// Default: immediately resolves
-    pub fn set_on_receive_answer<E>(
-        &mut self,
-        receive_answer_fn: &'static impl Fn(SignalSet<A, C>) -> ReceiveAnswerFut<E>,
-    ) -> &mut Self
+    pub fn set_on_receive_answer<F, Fut, E>(&mut self, mut f: F) -> &mut Self
     where
-        E: 'static,
+        F: FnMut(u64, (A, C)) -> Fut + 'static,
+        Fut: Future<Output = Result<u64, E>> + 'static,
         ClientError: From<E>
     {
         // wrap callback
-        self.receive_answer_task = Box::new(|answer| async {
-            let remote_id = receive_answer_fn(answer).await?;
-            Ok(SignallingState::ReceiveAnswer(remote_id))
-        }.boxed_local());
+        self.receive_answer_task = Box::new(move |remote_id, answer_set| {
+            let fut = f(remote_id, answer_set);
+            async {
+                let remote_id = fut.await?;
+                Ok(SignallingState::ReceiveAnswer(remote_id))
+            }.boxed_local()
+        });
         self
     }
     /// Set callback for handling completion of a local (offerer) signalling chain
     ///
+    /// `f:` User provided closure which receives a `remote_id`, handles signalling chain completion, and returns the `remote_id`
+    ///
     /// Default: immediately resolves
-    pub fn set_on_local_sig_cplt<E>(
-        &mut self,
-        local_sig_cplt_fn: &'static impl Fn(u64) -> LocalSigCpltFut<E>,
-    ) -> &mut Self
+    pub fn set_on_local_sig_cplt<F, Fut, E>(&mut self, mut f: F) -> &mut Self
     where
-        E: 'static,
+        F: FnMut(u64) -> Fut + 'static,
+        Fut: Future<Output = Result<u64, E>> + 'static,
         ClientError: From<E>
     {
-        self.local_sig_cplt_task = Box::new(|id| {
-            let f = local_sig_cplt_fn(id);
+        self.local_sig_cplt_task = Box::new(move |remote_id| {
+            let fut = f(remote_id);
             async {
-                let id = f.await?;
-                Ok(SignallingState::LocalSigCplt(id))
+                let remote_id = fut.await?;
+                Ok(SignallingState::LocalSigCplt(remote_id))
             }.boxed_local()
         });
         self
     }
     /// Set callback for handling receiving of offer signals
     ///
+    /// `f:` User provided closure which receives `remote_id, (offer, candidates)`, generates an answer signal, and returns a `(remote_id, (answer, candidates))`
+    ///
     /// Default: never resolves, callback must be set for functional client!
-    pub fn set_on_receive_offer<E>(
-        &mut self,
-        receive_offer_fn: &'static impl Fn(SignalSet<O, C>) ->  ReceiveOfferFut<A, C, E>,
-    ) -> &mut Self
+    pub fn set_on_receive_offer<F, Fut, E>(&mut self, mut f: F) -> &mut Self
     where
-        E: 'static,
+        F: FnMut(u64, (O, C)) -> Fut + 'static,
+        Fut: Future<Output = Result<(u64, (A, C)), E>> + 'static,
         ClientError: From<E>
     {
-        self.receive_offer_task = Box::new(|offer| {
+        self.receive_offer_task = Box::new(move |remote_id, offer_set| {
+            let fut = f(remote_id, offer_set);
             async {
-                let answer = receive_offer_fn(offer).await?;
-                Ok(SignallingState::ReceiveOffer(answer))
+                let (remote_id, answer_set) = fut.await?;
+                Ok(SignallingState::ReceiveOffer(remote_id, answer_set))
             }.boxed_local()
         });
         self
     }
     /// Set callback for handling completion of a remote (answerer) signalling chain
     ///
+    /// `f:` User provided closure which receives a `remote_id`, handles signalling chain completion, and returns the `remote_id`
+    ///
     /// Default: immediately resolves
-    pub fn set_on_remote_sig_cplt<E>(
-        &mut self,
-        remote_sig_cplt_fn: &'static impl Fn(u64) -> RemoteSigCpltFut<E>,
-    ) -> &mut Self
+    pub fn set_on_remote_sig_cplt<F, Fut, E>(&mut self, mut f: F) -> &mut Self
     where
-        E: 'static,
+        F: FnMut(u64) -> Fut + 'static,
+        Fut: Future<Output = Result<u64, E>> + 'static,
         ClientError: From<E>
     {
-        self.remote_sig_cplt_task = Box::new(|id| {
-            let f = remote_sig_cplt_fn(id);
-            async  {
-                let id = f.await?;
-                Ok(SignallingState::RemoteSigCplt(id))
+        self.remote_sig_cplt_task = Box::new(move |remote_id| {
+            let fut = f(remote_id);
+            async {
+                let remote_id = fut.await?;
+                Ok(SignallingState::RemoteSigCplt(remote_id))
             }.boxed_local()
         });
         self
     }
 
-
-    /// Step the signalling concurrent state machine for a peer
+    /// Step the concurrent state machine of the signalling peer
     pub async fn step(&mut self, client: &mut RtcSignallingClient) -> ClientResult<()> {
         let id = self.local_id;
 
@@ -377,22 +334,22 @@ where
             },
             // Local peer connections generate offers...
             // Offers are signalled to the remote peers...
-            SignallingState::CreateOffer(offer_set) => {
+            SignallingState::CreateOffer(remote_id, (offer, candidates)) => {
                 debug!("create offer task completed ({id:#016x})");
                 // perform signalling of offer
-                let remote_id = client.signal_offer(id, offer_set.remote_id, offer_set.desc, offer_set.candidates).await?;
+                let remote_id = client.signal_offer(id, remote_id, offer, candidates).await?;
                 debug!("signalling of offer completed ({id:#016x})");
                 info!("offer signalled to peer. (remote peer: {remote_id:#016x})");
                 // do nothing, local signalling chain continues when answer listener receives an answer
             },
             // Listen for answers from the remote peers...
-            SignallingState::AnswerListener(listener, answer_set) => {
+            SignallingState::AnswerListener(listener, remote_id, answer_set) => {
                 debug!("answer listener task completed ({id:#016x})");
                 // requeue reset answer listener future
                 // queue receive answer
                 self.unordered_futs.extend([
                     answer_listener_task(listener).boxed_local(),
-                    (self.receive_answer_task)(answer_set),
+                    (self.receive_answer_task)(remote_id, answer_set),
                 ]);
             },
             // We wait to receive answer responses from the remote peers,
@@ -412,23 +369,23 @@ where
 
             // Start of a "remote" signalling chain
             // OfferListener receives a remote offer.
-            SignallingState::OfferListener(listener, offer_set) => {
+            SignallingState::OfferListener(listener, remote_id, offer_set) => {
                 debug!("offer listener task completed ({id:#016x})");
                 // requeue offer listener future
                 // queue receive offer
                 self.unordered_futs.extend([
                     offer_listener_task(listener).boxed_local(),
-                    (self.receive_offer_task)(offer_set),
+                    (self.receive_offer_task)(remote_id, offer_set),
                 ]);
             },
             // This offer is used to create a remote peer connection and generate an answer...
             // The answer is sent to the remote offerer,
             // Completing a "remote" signalling chain.
             // And starting a remote signalling chain complete handler.
-            SignallingState::ReceiveOffer(answer_set) => {
+            SignallingState::ReceiveOffer(remote_id, (answer, candidates)) => {
                 debug!("receive offer task completed ({id:#016x})");
                 // perform signalling of answer
-                let remote_id = client.signal_answer(id, answer_set.remote_id, answer_set.desc, answer_set.candidates).await?;
+                let remote_id = client.signal_answer(id, remote_id, answer, candidates).await?;
                 debug!("signalling of answer completed ({id:#016x})");
                 trace!("remote signalling chain complete. (remote peer: {remote_id:#016x})");
                 // queue remote signalling complete handler
