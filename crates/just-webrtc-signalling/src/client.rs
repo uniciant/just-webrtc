@@ -5,7 +5,7 @@ extern crate alloc;
 use core::{fmt::Debug, future::Future, pin::Pin, time::Duration};
 use alloc::collections::BTreeSet;
 
-use futures_util::{stream::FuturesUnordered, FutureExt, StreamExt};
+use futures_util::{lock::Mutex, stream::FuturesUnordered, FutureExt, StreamExt};
 use log::{debug, info, trace, warn};
 use tonic::{metadata::MetadataMap, Extensions, Request, Streaming};
 
@@ -121,7 +121,7 @@ where
 type SignallingStateFut<A, O, C> = Pin<Box<dyn Future<Output = ClientResult<SignallingState<A, O, C>>>>>;
 
 /// A Just WebRTC Signalling peer
-pub struct RtcSignallingPeer<A, O, C> {
+pub struct RtcSignallingPeer<'a, A, O, C> {
     local_id: u64,
     discovered_peers: BTreeSet<u64>,
     first_discovery: bool,
@@ -133,9 +133,11 @@ pub struct RtcSignallingPeer<A, O, C> {
     remote_sig_cplt_task: Box<dyn FnMut(u64) -> SignallingStateFut<A, O, C>>,
     // queued futures
     unordered_futs: FuturesUnordered<SignallingStateFut<A, O, C>>,
+    // client
+    client: &'a RtcSignallingClient,
 }
 
-impl<A, O, C> Debug for RtcSignallingPeer<A, O, C> {
+impl<'a, A, O, C> Debug for RtcSignallingPeer<'a, A, O, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RtcSignallingPeer")
             .field("local_id", &self.local_id)
@@ -146,7 +148,7 @@ impl<A, O, C> Debug for RtcSignallingPeer<A, O, C> {
     }
 }
 
-impl<A, O, C> RtcSignallingPeer<A, O, C>
+impl<'a, A, O, C> RtcSignallingPeer<'a, A, O, C>
 where
     A: serde::Serialize + serde::de::DeserializeOwned + 'static,
     O: serde::Serialize + serde::de::DeserializeOwned + 'static,
@@ -158,6 +160,7 @@ where
         peer_listener: Streaming<PeerListenerRsp>,
         offer_listener: Streaming<OfferListenerRsp>,
         answer_listener: Streaming<AnswerListenerRsp>,
+        client: &'a RtcSignallingClient,
     ) -> Self {
         let unordered_futs = FuturesUnordered::new();
         // queue initial listener tasks
@@ -169,6 +172,7 @@ where
             discovered_peers: BTreeSet::new(),
             first_discovery: true,
             unordered_futs,
+            client,
             // default callback tasks
             create_offer_task: Box::new(|_remote_id| std::future::pending().boxed_local()),
             receive_answer_task: Box::new(|remote_id, _answer_set| async move { Ok(SignallingState::ReceiveAnswer(remote_id)) }.boxed_local()),
@@ -282,7 +286,7 @@ where
     }
 
     /// Step the concurrent state machine of the signalling peer
-    pub async fn step(&mut self, client: &mut RtcSignallingClient) -> ClientResult<()> {
+    pub async fn step(&mut self) -> ClientResult<()> {
         let id = self.local_id;
 
         // await next state completion
@@ -337,7 +341,7 @@ where
             SignallingState::CreateOffer(remote_id, (offer, candidates)) => {
                 debug!("create offer task completed ({id:#016x})");
                 // perform signalling of offer
-                let remote_id = client.signal_offer(id, remote_id, offer, candidates).await?;
+                let remote_id = self.client.signal_offer(id, remote_id, offer, candidates).await?;
                 debug!("signalling of offer completed ({id:#016x})");
                 info!("offer signalled to peer. (remote peer: {remote_id:#016x})");
                 // do nothing, local signalling chain continues when answer listener receives an answer
@@ -385,7 +389,7 @@ where
             SignallingState::ReceiveOffer(remote_id, (answer, candidates)) => {
                 debug!("receive offer task completed ({id:#016x})");
                 // perform signalling of answer
-                let remote_id = client.signal_answer(id, remote_id, answer, candidates).await?;
+                let remote_id = self.client.signal_answer(id, remote_id, answer, candidates).await?;
                 debug!("signalling of answer completed ({id:#016x})");
                 trace!("remote signalling chain complete. (remote peer: {remote_id:#016x})");
                 // queue remote signalling complete handler
@@ -409,9 +413,9 @@ where
 pub struct RtcSignallingClient {
     grpc_metadata: MetadataMap,
     #[cfg(not(target_arch = "wasm32"))]
-    inner: crate::pb::rtc_signalling_client::RtcSignallingClient<tonic::transport::Channel>,
+    inner: Mutex<crate::pb::rtc_signalling_client::RtcSignallingClient<tonic::transport::Channel>>,
     #[cfg(target_arch = "wasm32")]
-    inner: crate::pb::rtc_signalling_client::RtcSignallingClient<tonic_web_wasm_client::Client>,
+    inner: Mutex<crate::pb::rtc_signalling_client::RtcSignallingClient<tonic_web_wasm_client::Client>>,
 }
 
 /// Private helper methods
@@ -422,23 +426,29 @@ impl RtcSignallingClient {
     }
 
     /// Private advertise helper method
-    async fn advertise(&mut self) -> Result<u64, tonic::Status> {
+    async fn advertise(&self) -> Result<u64, tonic::Status> {
         debug!("sending advertise request");
         let request = self.build_request(AdvertiseReq {});
-        let response = self.inner.advertise(request).await?;
+        let response = {
+            let mut client = self.inner.lock().await;
+            client.advertise(request).await?
+        };
         let local_id = response.into_inner().local_peer.unwrap().id;
         debug!("received advertise response ({local_id:#016x})");
         Ok(local_id)
     }
     /// Private peer discover helper method
-    async fn _peer_discover(&mut self, id: u64) -> Result<Vec<u64>, tonic::Status> {
+    async fn _peer_discover(&self, id: u64) -> Result<Vec<u64>, tonic::Status> {
         debug!("sending peer discover request ({id:#016x})");
         let request = self.build_request(
             PeerDiscoverReq {
                 local_peer: Some(PeerId { id }),
             },
         );
-        let response = self.inner.peer_discover(request).await?;
+        let response = {
+            let mut client = self.inner.lock().await;
+            client.peer_discover(request).await?
+        };
         debug!("received peer discover response ({id:#016x})");
         Ok(response
             .into_inner()
@@ -449,7 +459,7 @@ impl RtcSignallingClient {
     }
     /// Private open peer listener helper method
     async fn open_peer_listener(
-        &mut self,
+        &self,
         id: u64,
     ) -> Result<Streaming<PeerListenerRsp>, tonic::Status> {
         let request = Request::from_parts(
@@ -460,14 +470,17 @@ impl RtcSignallingClient {
             },
         );
         debug!("sending open peer listener request ({id:#016x})");
-        let response = self.inner.open_peer_listener(request).await?;
+        let response = {
+            let mut client = self.inner.lock().await;
+            client.open_peer_listener(request).await?
+        };
         debug!("received open peer listener response ({id:#016x})");
         let peer_listener = response.into_inner();
         Ok(peer_listener)
     }
     /// Private open offer listener helper method
     async fn open_offer_listener(
-        &mut self,
+        &self,
         id: u64,
     ) -> Result<Streaming<OfferListenerRsp>, tonic::Status> {
         debug!("sending open offer listener request ({id:#016x})");
@@ -476,14 +489,17 @@ impl RtcSignallingClient {
                 local_peer: Some(PeerId { id }),
             },
         );
-        let response = self.inner.open_offer_listener(request).await?;
+        let response = {
+            let mut client = self.inner.lock().await;
+            client.open_offer_listener(request).await?
+        };
         debug!("received open offer listener response ({id:#016x})");
         let offer_listener = response.into_inner();
         Ok(offer_listener)
     }
     /// Private open answer listener helper method
     async fn open_answer_listener(
-        &mut self,
+        &self,
         id: u64,
     ) -> Result<Streaming<AnswerListenerRsp>, tonic::Status> {
         debug!("sending open answer listener request ({id:#016x})");
@@ -492,14 +508,17 @@ impl RtcSignallingClient {
                 local_peer: Some(PeerId { id }),
             },
         );
-        let response = self.inner.open_answer_listener(request).await?;
+        let response = {
+            let mut client = self.inner.lock().await;
+            client.open_answer_listener(request).await?
+        };
         debug!("received open answer listener response ({id:#016x})");
         let answer_listener = response.into_inner();
         Ok(answer_listener)
     }
     /// Private signal answer helper method
     async fn signal_answer<A, C>(
-        &mut self,
+        &self,
         id: u64,
         remote_id: u64,
         answer: A,
@@ -521,13 +540,16 @@ impl RtcSignallingClient {
                 answer_signal: Some(answer_signal),
             },
         );
-        let _response = self.inner.signal_answer(request).await?;
+        let _response = {
+            let mut client = self.inner.lock().await;
+            client.signal_answer(request).await?
+        };
         debug!("received signal answer response ({id:#016x})");
         Ok(remote_id)
     }
     /// Private signal offer helper method
     async fn signal_offer<O, C>(
-        &mut self,
+        &self,
         id: u64,
         remote_id: u64,
         offer: O,
@@ -550,7 +572,10 @@ impl RtcSignallingClient {
             },
         );
         // queue signalling of offer
-        let _response = self.inner.signal_offer(request).await?;
+        let _response = {
+            let mut client = self.inner.lock().await;
+            client.signal_offer(request).await?
+        };
         debug!("received signal offer response ({id:#016x})");
         Ok(remote_id)
     }
@@ -643,7 +668,7 @@ impl RtcSignallingClientBuilder {
 
         Ok(RtcSignallingClient {
             grpc_metadata,
-            inner: client,
+            inner: Mutex::new(client),
         })
     }
 }
@@ -653,7 +678,7 @@ impl RtcSignallingClient {
     ///
     /// Connects the peer and returns [`RtcSignallingPeer`]
     pub async fn start_peer<A, O, C>(
-        &mut self
+        &self
     ) -> ClientResult<RtcSignallingPeer<A, O, C>>
     where
         A: serde::Serialize + serde::de::DeserializeOwned + 'static,
@@ -664,7 +689,7 @@ impl RtcSignallingClient {
         let peer_listener = self.open_peer_listener(local_id).await?;
         let offer_listener = self.open_offer_listener(local_id).await?;
         let answer_listener = self.open_answer_listener(local_id).await?;
-        let signalling_peer = RtcSignallingPeer::new(local_id, peer_listener, offer_listener, answer_listener);
+        let signalling_peer = RtcSignallingPeer::new(local_id, peer_listener, offer_listener, answer_listener, self);
         Ok(signalling_peer)
     }
 }
