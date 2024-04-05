@@ -53,11 +53,8 @@ async fn run_peer(local: bool) -> Result<()> {
     // build signalling client
     let signalling_client =
         RtcSignallingClientBuilder::default().build(DEFAULT_NATIVE_SERVER_ADDR.to_string())?;
-    let signalling_client = signalling_client;
     // start peer
-    let mut signalling_peer = signalling_client
-        .start_peer::<String, String, String>()
-        .await?;
+    let mut signalling_peer = signalling_client.start_peer().await?;
     // set callbacks
     signalling_peer.set_on_create_offer(create_offer);
     signalling_peer.set_on_receive_answer(receive_answer);
@@ -66,9 +63,10 @@ async fn run_peer(local: bool) -> Result<()> {
     signalling_peer.set_on_remote_sig_cplt(remote_sig_cplt);
     // run signalling peer
     loop {
-        if local && LOCAL_SIGNALLING_COMPLETE.load(Ordering::Relaxed) {
-            return Ok(());
-        } else if !local && REMOTE_SIGNALLING_COMPLETE.load(Ordering::Relaxed) {
+        if local && LOCAL_SIGNALLING_COMPLETE.load(Ordering::Relaxed)
+            || !local && REMOTE_SIGNALLING_COMPLETE.load(Ordering::Relaxed)
+        {
+            signalling_peer.close().await?;
             return Ok(());
         }
         signalling_peer.step().await?;
