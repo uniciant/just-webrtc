@@ -1,19 +1,34 @@
 //! Just WebRTC Signalling full-mesh client for both `native` and `wasm`
 
-use std::{collections::HashSet, future::Future, pin::Pin, time::Duration};
+extern crate alloc;
 
-use futures_util::{pin_mut, select, stream::FuturesUnordered, FutureExt, StreamExt};
+use alloc::collections::BTreeSet;
+use core::{fmt::Debug, future::Future, pin::Pin, time::Duration};
+
+use futures_util::{lock::Mutex, stream::FuturesUnordered, FutureExt, StreamExt};
 use log::{debug, info, trace, warn};
 use tonic::{metadata::MetadataMap, Extensions, Request, Streaming};
 
 use crate::pb::{
     AdvertiseReq, AnswerListenerReq, AnswerListenerRsp, Change, OfferListenerReq, OfferListenerRsp,
     PeerChange, PeerDiscoverReq, PeerId, PeerListenerReq, PeerListenerRsp, SignalAnswer,
-    SignalAnswerReq, SignalOffer, SignalOfferReq,
+    SignalAnswerReq, SignalOffer, SignalOfferReq, TeardownReq,
 };
 
-/// Default deadline for gRPC method response
+/// Default deadline for gRPC method response (10 seconds)
 pub const DEFAULT_RESPONSE_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Signalling state machine states
+enum SignallingState<A, O, C> {
+    PeerListener(Streaming<PeerListenerRsp>, Vec<PeerChange>),
+    OfferListener(Streaming<OfferListenerRsp>, u64, (O, C)),
+    AnswerListener(Streaming<AnswerListenerRsp>, u64, (A, C)),
+    CreateOffer(u64, (O, C)),
+    ReceiveAnswer(u64),
+    LocalSigCplt(u64),
+    ReceiveOffer(u64, (A, C)),
+    RemoteSigCplt(u64),
+}
 
 /// Signalling client error
 #[derive(thiserror::Error, Debug)]
@@ -21,15 +36,9 @@ pub enum ClientError {
     /// Bincode encoding/decoding error
     #[error(transparent)]
     Bincode(#[from] bincode::Error),
-    /// Pre-existing peer connection error
-    #[error("Pre-existing connection with peer!")]
-    PreExistingPeerConnection,
     /// Listener closed error
     #[error("Listener closed unexpectedly!")]
     ListenerClosed,
-    /// Listener unavailable error
-    #[error("Listener unavailable!")]
-    ListenerUnavailable,
     /// Invalid URL error
     #[error("Invalid URL")]
     InvalidUrl,
@@ -48,77 +57,441 @@ pub enum ClientError {
 /// Just WebRTC client result type
 pub type ClientResult<T> = Result<T, ClientError>;
 
-/// Set of description, candidates and a remote peer ID.
-#[derive(Debug)]
-pub struct SignalSet<D, C> {
-    /// Serializable session description
-    pub desc: D,
-    /// Serializable ICE candidates
-    pub candidates: C,
-    /// Remote peer ID
-    pub remote_id: u64,
-}
-
 /// Private peer listener helper method
-async fn peer_listener_task(
+async fn peer_listener_task<A, O, C>(
     mut listener: Streaming<PeerListenerRsp>,
-) -> ClientResult<(Streaming<PeerListenerRsp>, Vec<PeerChange>)> {
+) -> ClientResult<SignallingState<A, O, C>> {
     if let Some(message) = listener.message().await? {
-        Ok((listener, message.peer_changes))
+        Ok(SignallingState::PeerListener(
+            listener,
+            message.peer_changes,
+        ))
     } else {
         Err(ClientError::ListenerClosed)
     }
 }
+
 /// Private offer listener helper method
-async fn offer_listener_task<O, C>(
+async fn offer_listener_task<A, O, C>(
     mut listener: Streaming<OfferListenerRsp>,
-) -> ClientResult<(Streaming<OfferListenerRsp>, SignalSet<O, C>)>
+) -> ClientResult<SignallingState<A, O, C>>
 where
     O: serde::de::DeserializeOwned,
     C: serde::de::DeserializeOwned,
 {
-    if let Some(message) = listener.message().await? {
-        if let Some(signal) = message.offer_signal {
-            let offer = bincode::deserialize(&signal.offer)?;
-            let candidates = bincode::deserialize(&signal.candidates)?;
-            let offer_set = SignalSet {
-                desc: offer,
-                candidates,
-                remote_id: signal.offerer_id,
-            };
-            Ok((listener, offer_set))
+    // loop over empty messages
+    loop {
+        if let Some(message) = listener.message().await? {
+            if let Some(signal) = message.offer_signal {
+                let offer = bincode::deserialize(&signal.offer)?;
+                let candidates = bincode::deserialize(&signal.candidates)?;
+                return Ok(SignallingState::OfferListener(
+                    listener,
+                    signal.offerer_id,
+                    (offer, candidates),
+                ));
+            } else {
+                trace!("received empty offer message.");
+                continue;
+            }
         } else {
-            trace!("received empty offer message.");
-            offer_listener_task(listener).boxed_local().await
+            return Err(ClientError::ListenerClosed);
         }
-    } else {
-        Err(ClientError::ListenerClosed)
     }
 }
 /// Private answer listener helper method
-async fn answer_listener_task<A, C>(
+async fn answer_listener_task<A, O, C>(
     mut listener: Streaming<AnswerListenerRsp>,
-) -> ClientResult<(Streaming<AnswerListenerRsp>, SignalSet<A, C>)>
+) -> ClientResult<SignallingState<A, O, C>>
 where
     A: serde::de::DeserializeOwned,
     C: serde::de::DeserializeOwned,
 {
-    if let Some(message) = listener.message().await? {
-        if let Some(signal) = message.answer_signal {
-            let answer = bincode::deserialize(&signal.answer)?;
-            let candidates = bincode::deserialize(&signal.candidates)?;
-            let answer_set = SignalSet {
-                desc: answer,
-                candidates,
-                remote_id: signal.answerer_id,
-            };
-            Ok((listener, answer_set))
+    // loop over empty messages
+    loop {
+        if let Some(message) = listener.message().await? {
+            if let Some(signal) = message.answer_signal {
+                let answer = bincode::deserialize(&signal.answer)?;
+                let candidates = bincode::deserialize(&signal.candidates)?;
+                return Ok(SignallingState::AnswerListener(
+                    listener,
+                    signal.answerer_id,
+                    (answer, candidates),
+                ));
+            } else {
+                trace!("received empty answer message.");
+                continue;
+            }
         } else {
-            trace!("received empty answer message.");
-            answer_listener_task(listener).boxed_local().await
+            return Err(ClientError::ListenerClosed);
         }
-    } else {
-        Err(ClientError::ListenerClosed)
+    }
+}
+
+/// Private signalling state machine future
+type SignallingStateFut<A, O, C> =
+    Pin<Box<dyn Future<Output = ClientResult<SignallingState<A, O, C>>>>>;
+// Private signalling state machine function
+type SignallingStateFn<A, O, C, P> = Box<dyn FnMut(P) -> SignallingStateFut<A, O, C>>;
+
+/// A Just WebRTC Signalling peer
+///
+/// ### Thread-safety
+/// To avoid overhead when running peers in single-threaded environments,
+/// [`RtcSignallingPeer`] cannot be sent between threads safely.
+pub struct RtcSignallingPeer<'a, A, O, C> {
+    local_id: u64,
+    discovered_peers: BTreeSet<u64>,
+    first_discovery: bool,
+    // wrapped callback functions
+    create_offer_task: SignallingStateFn<A, O, C, u64>,
+    receive_answer_task: SignallingStateFn<A, O, C, (u64, (A, C))>,
+    local_sig_cplt_task: SignallingStateFn<A, O, C, u64>,
+    receive_offer_task: SignallingStateFn<A, O, C, (u64, (O, C))>,
+    remote_sig_cplt_task: SignallingStateFn<A, O, C, u64>,
+    // queued futures
+    unordered_futs: FuturesUnordered<SignallingStateFut<A, O, C>>,
+    // client
+    client: &'a RtcSignallingClient,
+}
+
+impl<'a, A, O, C> Debug for RtcSignallingPeer<'a, A, O, C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RtcSignallingPeer")
+            .field("local_id", &self.local_id)
+            .field("discovered_peers", &self.discovered_peers)
+            .field("first_discovery", &self.first_discovery)
+            .field("unordered_futs", &self.unordered_futs)
+            .finish()
+    }
+}
+
+impl<'a, A, O, C> RtcSignallingPeer<'a, A, O, C>
+where
+    A: serde::Serialize + serde::de::DeserializeOwned + 'static,
+    O: serde::Serialize + serde::de::DeserializeOwned + 'static,
+    C: serde::Serialize + serde::de::DeserializeOwned + 'static,
+{
+    /// Private creation of a signalling peer
+    fn new(
+        local_id: u64,
+        peer_listener: Streaming<PeerListenerRsp>,
+        offer_listener: Streaming<OfferListenerRsp>,
+        answer_listener: Streaming<AnswerListenerRsp>,
+        client: &'a RtcSignallingClient,
+    ) -> Self {
+        let unordered_futs = FuturesUnordered::new();
+        // queue initial listener tasks
+        unordered_futs.push(peer_listener_task(peer_listener).boxed_local());
+        unordered_futs.push(offer_listener_task(offer_listener).boxed_local());
+        unordered_futs.push(answer_listener_task(answer_listener).boxed_local());
+        Self {
+            local_id,
+            discovered_peers: BTreeSet::new(),
+            first_discovery: true,
+            unordered_futs,
+            client,
+            // default callback tasks
+            create_offer_task: Box::new(|_remote_id| std::future::pending().boxed_local()),
+            receive_answer_task: Box::new(|(remote_id, _answer_set)| {
+                async move { Ok(SignallingState::ReceiveAnswer(remote_id)) }.boxed_local()
+            }),
+            local_sig_cplt_task: Box::new(|remote_id| {
+                async move { Ok(SignallingState::LocalSigCplt(remote_id)) }.boxed_local()
+            }),
+            receive_offer_task: Box::new(|(_remote_id, _offer_set)| {
+                std::future::pending().boxed_local()
+            }),
+            remote_sig_cplt_task: Box::new(|remote_id| {
+                async move { Ok(SignallingState::RemoteSigCplt(remote_id)) }.boxed_local()
+            }),
+        }
+    }
+
+    /// Set callback for handling creation of offer signals
+    ///
+    /// `f:` User provided closure which receives a `remote_id`, creates an offer signal, and returns an `(remote_id (offer, candidates))`
+    ///
+    /// Default: never resolves, callback must be set for functional client!
+    pub fn set_on_create_offer<F, Fut, E>(&mut self, mut f: F) -> &mut Self
+    where
+        F: FnMut(u64) -> Fut + 'static,
+        Fut: Future<Output = Result<(u64, (O, C)), E>> + 'static,
+        ClientError: From<E>,
+    {
+        // wrap callback
+        self.create_offer_task = Box::new(move |remote_id| {
+            let fut = f(remote_id);
+            async {
+                let (remote_id, offer_set) = fut.await?;
+                Ok(SignallingState::CreateOffer(remote_id, offer_set))
+            }
+            .boxed_local()
+        });
+        self
+    }
+    /// Set callback for handling receiving of answer signals
+    ///
+    /// `f:` User provided closure which receives `remote_id, (answer, candidates)`, creates an answer signal, and returns the `remote_id`
+    ///
+    /// Default: immediately resolves
+    pub fn set_on_receive_answer<F, Fut, E>(&mut self, mut f: F) -> &mut Self
+    where
+        F: FnMut(u64, (A, C)) -> Fut + 'static,
+        Fut: Future<Output = Result<u64, E>> + 'static,
+        ClientError: From<E>,
+    {
+        // wrap callback
+        self.receive_answer_task = Box::new(move |(remote_id, answer_set)| {
+            let fut = f(remote_id, answer_set);
+            async {
+                let remote_id = fut.await?;
+                Ok(SignallingState::ReceiveAnswer(remote_id))
+            }
+            .boxed_local()
+        });
+        self
+    }
+    /// Set callback for handling completion of a local (offerer) signalling chain
+    ///
+    /// `f:` User provided closure which receives a `remote_id`, handles signalling chain completion, and returns the `remote_id`
+    ///
+    /// Default: immediately resolves
+    pub fn set_on_local_sig_cplt<F, Fut, E>(&mut self, mut f: F) -> &mut Self
+    where
+        F: FnMut(u64) -> Fut + 'static,
+        Fut: Future<Output = Result<u64, E>> + 'static,
+        ClientError: From<E>,
+    {
+        self.local_sig_cplt_task = Box::new(move |remote_id| {
+            let fut = f(remote_id);
+            async {
+                let remote_id = fut.await?;
+                Ok(SignallingState::LocalSigCplt(remote_id))
+            }
+            .boxed_local()
+        });
+        self
+    }
+    /// Set callback for handling receiving of offer signals
+    ///
+    /// `f:` User provided closure which receives `remote_id, (offer, candidates)`, generates an answer signal, and returns a `(remote_id, (answer, candidates))`
+    ///
+    /// Default: never resolves, callback must be set for functional client!
+    pub fn set_on_receive_offer<F, Fut, E>(&mut self, mut f: F) -> &mut Self
+    where
+        F: FnMut(u64, (O, C)) -> Fut + 'static,
+        Fut: Future<Output = Result<(u64, (A, C)), E>> + 'static,
+        ClientError: From<E>,
+    {
+        self.receive_offer_task = Box::new(move |(remote_id, offer_set)| {
+            let fut = f(remote_id, offer_set);
+            async {
+                let (remote_id, answer_set) = fut.await?;
+                Ok(SignallingState::ReceiveOffer(remote_id, answer_set))
+            }
+            .boxed_local()
+        });
+        self
+    }
+    /// Set callback for handling completion of a remote (answerer) signalling chain
+    ///
+    /// `f:` User provided closure which receives a `remote_id`, handles signalling chain completion, and returns the `remote_id`
+    ///
+    /// Default: immediately resolves
+    pub fn set_on_remote_sig_cplt<F, Fut, E>(&mut self, mut f: F) -> &mut Self
+    where
+        F: FnMut(u64) -> Fut + 'static,
+        Fut: Future<Output = Result<u64, E>> + 'static,
+        ClientError: From<E>,
+    {
+        self.remote_sig_cplt_task = Box::new(move |remote_id| {
+            let fut = f(remote_id);
+            async {
+                let remote_id = fut.await?;
+                Ok(SignallingState::RemoteSigCplt(remote_id))
+            }
+            .boxed_local()
+        });
+        self
+    }
+
+    /// Get the local ID of this peer
+    pub fn id(&self) -> u64 {
+        self.local_id
+    }
+
+    /// Close and consume the signalling peer
+    pub async fn close(self) -> ClientResult<()> {
+        self.client.teardown(self.local_id).await?;
+        Ok(())
+    }
+
+    /// Step the concurrent state machine of the signalling peer
+    pub async fn step(&mut self) -> ClientResult<()> {
+        let id = self.local_id;
+
+        // await next state completion
+        let state_cplt = self.unordered_futs.next().await.unwrap()?;
+        // match the state, handle, and queue new states
+        match state_cplt {
+            // Start of "local" signalling chain
+            // PeerListener receives a list of remote peers.
+            // On first iteration, for each remote peer, create a local peer connection...
+            SignallingState::PeerListener(listener, peer_changes) => {
+                debug!("peer listener task completed ({id:#016x})");
+                // reset peer listener future
+                self.unordered_futs
+                    .push(peer_listener_task(listener).boxed_local());
+                // apply peer changes to discovered peers map
+                for peer_change in peer_changes.iter() {
+                    match peer_change.change() {
+                        Change::PeerChangeAdd => {
+                            if self.discovered_peers.insert(peer_change.id) {
+                                info!("Discovered peer ({:#016x}).", peer_change.id);
+                            } else {
+                                warn!(
+                                    "Rediscovered peer ({:#016x}). Synchronising...",
+                                    peer_change.id
+                                );
+                                // overwrite local list of discovered peers
+                                self.discovered_peers =
+                                    self.client.peer_discover(id).await?.into_iter().collect();
+                            }
+                        }
+                        Change::PeerChangeRemove => {
+                            if self.discovered_peers.remove(&peer_change.id) {
+                                warn!("Remote peer ({:#016x}) dropped by signalling. Existing connections with this peer will dangle.", peer_change.id);
+                            } else {
+                                warn!("Undiscovered remote peer ({:#016x}) dropped by signalling. Synchronising...", peer_change.id);
+                                // overwrite local list of discovered peers
+                                self.discovered_peers =
+                                    self.client.peer_discover(id).await?.into_iter().collect();
+                            }
+                        }
+                    }
+                }
+                // if this is the first discovery
+                // queue creation of offers for each remote peer (creates local peer connections)
+                if self.first_discovery {
+                    self.first_discovery = false;
+                    let create_offer_tasks = peer_changes.iter().filter_map(|peer_change| {
+                        if peer_change.change() == Change::PeerChangeAdd {
+                            let remote_id = peer_change.id;
+                            info!("starting local signalling chain. (remote: {remote_id:#016x}");
+                            Some((self.create_offer_task)(remote_id))
+                        } else {
+                            None
+                        }
+                    });
+                    self.unordered_futs.extend(create_offer_tasks);
+                }
+            }
+            // Local peer connections generate offers...
+            // Offers are signalled to the remote peers...
+            SignallingState::CreateOffer(remote_id, (offer, candidates)) => {
+                debug!("create offer task completed ({id:#016x})");
+                // perform signalling of offer
+                let result = self
+                    .client
+                    .signal_offer(id, remote_id, offer, candidates)
+                    .await;
+                // handle peer disconnected result
+                let remote_id = match result {
+                    Ok(remote_id) => remote_id,
+                    Err(ClientError::TonicStatus(status)) => match status.code() {
+                        tonic::Code::FailedPrecondition => {
+                            warn!(
+                                "could not signal offer to peer ({remote_id:#016x}): {}",
+                                status.message()
+                            );
+                            return Ok(());
+                        }
+                        _ => return Err(ClientError::TonicStatus(status)),
+                    },
+                    Err(e) => return Err(e),
+                };
+                debug!("signalling of offer completed ({id:#016x})");
+                info!("offer signalled to peer. (remote peer: {remote_id:#016x})");
+                // do nothing, local signalling chain continues when answer listener receives an answer
+            }
+            // Listen for answers from the remote peers...
+            SignallingState::AnswerListener(listener, remote_id, answer_set) => {
+                debug!("answer listener task completed ({id:#016x})");
+                // requeue reset answer listener future
+                // queue receive answer
+                self.unordered_futs.extend([
+                    answer_listener_task(listener).boxed_local(),
+                    (self.receive_answer_task)((remote_id, answer_set)),
+                ]);
+            }
+            // We wait to receive answer responses from the remote peers,
+            // Completing a "local" signalling chain.
+            // And starting a local signalling chain complete handler.
+            SignallingState::ReceiveAnswer(remote_id) => {
+                debug!("receive answer task completed ({id:#016x})");
+                info!("local signalling chain complete. (remote peer: {remote_id:#016x})");
+                // queue local signalling complete handler
+                self.unordered_futs
+                    .push((self.local_sig_cplt_task)(remote_id));
+            }
+            // Finally, the local signalling chain complete hander exits
+            SignallingState::LocalSigCplt(remote_id) => {
+                debug!("local signalling cplt task completed ({id:#016x})");
+                info!("local signalling handler complete. (remote peer: {remote_id:#016x})");
+            }
+
+            // Start of a "remote" signalling chain
+            // OfferListener receives a remote offer.
+            SignallingState::OfferListener(listener, remote_id, offer_set) => {
+                debug!("offer listener task completed ({id:#016x})");
+                // requeue offer listener future
+                // queue receive offer
+                self.unordered_futs.extend([
+                    offer_listener_task(listener).boxed_local(),
+                    (self.receive_offer_task)((remote_id, offer_set)),
+                ]);
+            }
+            // This offer is used to create a remote peer connection and generate an answer...
+            // The answer is sent to the remote offerer,
+            // Completing a "remote" signalling chain.
+            // And starting a remote signalling chain complete handler.
+            SignallingState::ReceiveOffer(remote_id, (answer, candidates)) => {
+                debug!("receive offer task completed ({id:#016x})");
+                // perform signalling of answer
+                let result = self
+                    .client
+                    .signal_answer(id, remote_id, answer, candidates)
+                    .await;
+                // handle peer disconnected result
+                let remote_id = match result {
+                    Ok(remote_id) => remote_id,
+                    Err(ClientError::TonicStatus(status)) => match status.code() {
+                        tonic::Code::FailedPrecondition => {
+                            warn!(
+                                "could not signal answer to peer ({remote_id:#016x}): {}",
+                                status.message()
+                            );
+                            return Ok(());
+                        }
+                        _ => return Err(ClientError::TonicStatus(status)),
+                    },
+                    Err(e) => return Err(e),
+                };
+                debug!("signalling of answer completed ({id:#016x})");
+                info!("remote signalling chain complete. (remote peer: {remote_id:#016x})");
+                // queue remote signalling complete handler
+                self.unordered_futs
+                    .push((self.remote_sig_cplt_task)(remote_id));
+            }
+            // Finally, the remote signalling chain complete handler exits
+            SignallingState::RemoteSigCplt(remote_id) => {
+                debug!("remote signalling cplt task completed ({id:#016x})");
+                info!("remote signalling handler complete. (remote peer: {remote_id:#016x})");
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -129,37 +502,54 @@ where
 pub struct RtcSignallingClient {
     grpc_metadata: MetadataMap,
     #[cfg(not(target_arch = "wasm32"))]
-    inner: crate::pb::rtc_signalling_client::RtcSignallingClient<tonic::transport::Channel>,
+    inner: Mutex<crate::pb::rtc_signalling_client::RtcSignallingClient<tonic::transport::Channel>>,
     #[cfg(target_arch = "wasm32")]
-    inner: crate::pb::rtc_signalling_client::RtcSignallingClient<tonic_web_wasm_client::Client>,
+    inner:
+        Mutex<crate::pb::rtc_signalling_client::RtcSignallingClient<tonic_web_wasm_client::Client>>,
 }
 
 /// Private helper methods
 impl RtcSignallingClient {
+    /// Private request builder
+    fn build_request<M>(&self, message: M) -> Request<M> {
+        Request::from_parts(self.grpc_metadata.clone(), Extensions::default(), message)
+    }
+
     /// Private advertise helper method
-    async fn advertise(&mut self) -> Result<u64, tonic::Status> {
-        let request = Request::from_parts(
-            self.grpc_metadata.clone(),
-            Extensions::default(),
-            AdvertiseReq {},
-        );
+    async fn advertise(&self) -> Result<u64, tonic::Status> {
         debug!("sending advertise request");
-        let response = self.inner.advertise(request).await?;
+        let request = self.build_request(AdvertiseReq {});
+        let response = {
+            let mut client = self.inner.lock().await;
+            client.advertise(request).await?
+        };
         let local_id = response.into_inner().local_peer.unwrap().id;
         debug!("received advertise response ({local_id:#016x})");
         Ok(local_id)
     }
+    /// Private teardown helper method
+    async fn teardown(&self, id: u64) -> Result<(), tonic::Status> {
+        debug!("sending teardown request ({id:#016x})");
+        let request = self.build_request(TeardownReq {
+            local_peer: Some(PeerId { id }),
+        });
+        let _response = {
+            let mut client = self.inner.lock().await;
+            client.teardown(request).await?
+        };
+        debug!("received teardown response ({id:#016x})");
+        Ok(())
+    }
     /// Private peer discover helper method
-    async fn _peer_discover(&mut self, id: u64) -> Result<Vec<u64>, tonic::Status> {
-        let request = Request::from_parts(
-            self.grpc_metadata.clone(),
-            Extensions::default(),
-            PeerDiscoverReq {
-                local_peer: Some(PeerId { id }),
-            },
-        );
+    async fn peer_discover(&self, id: u64) -> Result<Vec<u64>, tonic::Status> {
         debug!("sending peer discover request ({id:#016x})");
-        let response = self.inner.peer_discover(request).await?;
+        let request = self.build_request(PeerDiscoverReq {
+            local_peer: Some(PeerId { id }),
+        });
+        let response = {
+            let mut client = self.inner.lock().await;
+            client.peer_discover(request).await?
+        };
         debug!("received peer discover response ({id:#016x})");
         Ok(response
             .into_inner()
@@ -170,61 +560,58 @@ impl RtcSignallingClient {
     }
     /// Private open peer listener helper method
     async fn open_peer_listener(
-        &mut self,
+        &self,
         id: u64,
     ) -> Result<Streaming<PeerListenerRsp>, tonic::Status> {
-        let request = Request::from_parts(
-            self.grpc_metadata.clone(),
-            Extensions::default(),
-            PeerListenerReq {
-                local_peer: Some(PeerId { id }),
-            },
-        );
+        let request = self.build_request(PeerListenerReq {
+            local_peer: Some(PeerId { id }),
+        });
         debug!("sending open peer listener request ({id:#016x})");
-        let response = self.inner.open_peer_listener(request).await?;
+        let response = {
+            let mut client = self.inner.lock().await;
+            client.open_peer_listener(request).await?
+        };
         debug!("received open peer listener response ({id:#016x})");
         let peer_listener = response.into_inner();
         Ok(peer_listener)
     }
     /// Private open offer listener helper method
     async fn open_offer_listener(
-        &mut self,
+        &self,
         id: u64,
     ) -> Result<Streaming<OfferListenerRsp>, tonic::Status> {
-        let request = Request::from_parts(
-            self.grpc_metadata.clone(),
-            Extensions::default(),
-            OfferListenerReq {
-                local_peer: Some(PeerId { id }),
-            },
-        );
         debug!("sending open offer listener request ({id:#016x})");
-        let response = self.inner.open_offer_listener(request).await?;
+        let request = self.build_request(OfferListenerReq {
+            local_peer: Some(PeerId { id }),
+        });
+        let response = {
+            let mut client = self.inner.lock().await;
+            client.open_offer_listener(request).await?
+        };
         debug!("received open offer listener response ({id:#016x})");
         let offer_listener = response.into_inner();
         Ok(offer_listener)
     }
     /// Private open answer listener helper method
     async fn open_answer_listener(
-        &mut self,
+        &self,
         id: u64,
     ) -> Result<Streaming<AnswerListenerRsp>, tonic::Status> {
-        let request = Request::from_parts(
-            self.grpc_metadata.clone(),
-            Extensions::default(),
-            AnswerListenerReq {
-                local_peer: Some(PeerId { id }),
-            },
-        );
         debug!("sending open answer listener request ({id:#016x})");
-        let response = self.inner.open_answer_listener(request).await?;
+        let request = self.build_request(AnswerListenerReq {
+            local_peer: Some(PeerId { id }),
+        });
+        let response = {
+            let mut client = self.inner.lock().await;
+            client.open_answer_listener(request).await?
+        };
         debug!("received open answer listener response ({id:#016x})");
         let answer_listener = response.into_inner();
         Ok(answer_listener)
     }
     /// Private signal answer helper method
     async fn signal_answer<A, C>(
-        &mut self,
+        &self,
         id: u64,
         remote_id: u64,
         answer: A,
@@ -234,27 +621,26 @@ impl RtcSignallingClient {
         A: serde::Serialize,
         C: serde::Serialize,
     {
+        debug!("sending signal answer request ({id:#016x})");
         let answer_signal = SignalAnswer {
             answerer_id: id,
             candidates: bincode::serialize(&candidates)?,
             answer: bincode::serialize(&answer)?,
         };
-        let request = Request::from_parts(
-            self.grpc_metadata.clone(),
-            Extensions::default(),
-            SignalAnswerReq {
-                offerer_peer: Some(PeerId { id: remote_id }),
-                answer_signal: Some(answer_signal),
-            },
-        );
-        debug!("sending signal answer request ({id:#016x})");
-        let _response = self.inner.signal_answer(request).await?;
+        let request = self.build_request(SignalAnswerReq {
+            offerer_peer: Some(PeerId { id: remote_id }),
+            answer_signal: Some(answer_signal),
+        });
+        let _response = {
+            let mut client = self.inner.lock().await;
+            client.signal_answer(request).await?
+        };
         debug!("received signal answer response ({id:#016x})");
         Ok(remote_id)
     }
     /// Private signal offer helper method
     async fn signal_offer<O, C>(
-        &mut self,
+        &self,
         id: u64,
         remote_id: u64,
         offer: O,
@@ -264,94 +650,104 @@ impl RtcSignallingClient {
         O: serde::Serialize,
         C: serde::Serialize,
     {
+        debug!("sending signal offer request ({id:#016x})");
         let offer_signal = SignalOffer {
             offerer_id: id,
             candidates: bincode::serialize(&candidates)?,
             offer: bincode::serialize(&offer)?,
         };
-        let request = Request::from_parts(
-            self.grpc_metadata.clone(),
-            Extensions::default(),
-            SignalOfferReq {
-                answerer_peer: Some(PeerId { id: remote_id }),
-                offer_signal: Some(offer_signal),
-            },
-        );
+        let request = self.build_request(SignalOfferReq {
+            answerer_peer: Some(PeerId { id: remote_id }),
+            offer_signal: Some(offer_signal),
+        });
         // queue signalling of offer
-        debug!("sending signal offer request ({id:#016x})");
-        let _response = self.inner.signal_offer(request).await?;
+        let _response = {
+            let mut client = self.inner.lock().await;
+            client.signal_offer(request).await?
+        };
         debug!("received signal offer response ({id:#016x})");
         Ok(remote_id)
     }
 }
 
-/// Return type of externally implemented function creating an offer signal
-///
-/// Future returning the resulting offer signal
-pub type CreateOfferFut<O, C, E> = Pin<Box<dyn Future<Output = Result<SignalSet<O, C>, E>>>>;
+/// Builder of Just WebRTC signalling clients
+#[derive(Debug)]
+pub struct RtcSignallingClientBuilder {
+    timeout: Duration,
+    tls_enabled: bool,
+    domain: Option<String>,
+    tls_ca_pem: Option<String>,
+}
 
-/// Return type of externally implemented function receiving an answer signal
-///
-/// Future returning a result with the remote peer id
-pub type ReceiveAnswerFut<E> = Pin<Box<dyn Future<Output = Result<u64, E>>>>;
+impl Default for RtcSignallingClientBuilder {
+    fn default() -> Self {
+        Self {
+            timeout: DEFAULT_RESPONSE_DEADLINE,
+            tls_enabled: false,
+            domain: None,
+            tls_ca_pem: None,
+        }
+    }
+}
 
-/// Return type of externally implemented function handling completion of local signalling
-///
-/// Future returning a result with the remote peer id
-pub type LocalSigCpltFut<E> = Pin<Box<dyn Future<Output = Result<u64, E>>>>;
+impl RtcSignallingClientBuilder {
+    /// Set the request timeout/deadline.
+    ///
+    /// Default: 10 seconds
+    pub fn set_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+    /// Enables TLS with provided domain and CA PEM strings
+    ///
+    /// Default: TLS disabled
+    pub fn set_tls(mut self, domain: String, tls_ca_pem: String) -> Self {
+        self.tls_enabled = true;
+        self.domain = Some(domain);
+        self.tls_ca_pem = Some(tls_ca_pem);
+        self
+    }
 
-/// Return type of externally implemented function receiving an offer signal and returning an answer
-///
-/// Future returning the resulting answer signal
-pub type ReceiveOfferFut<A, C, E> = Pin<Box<dyn Future<Output = Result<SignalSet<A, C>, E>>>>;
-
-/// Return type of externally implemented function handling completion of remote signalling
-///
-/// Returns a result with the remote peer id
-pub type RemoteSigCpltFut<E> = Pin<Box<dyn Future<Output = Result<u64, E>>>>;
-
-impl RtcSignallingClient {
-    /// Create the client and open connections to the signalling service.
+    /// Create a signalling client from the builder
     ///
     /// Returns resulting signalling client
-    pub async fn connect(
-        addr: String,
-        timeout: Option<Duration>,
-        tls_enabled: bool,
-        domain: Option<String>,
-        tls_ca_pem: Option<String>,
-    ) -> ClientResult<Self> {
+    pub fn build(&self, addr: String) -> ClientResult<RtcSignallingClient> {
+        let timeout = self.timeout;
         // create an empty temp request to build timeout metadata
         let mut tmp_req = Request::new(());
-        tmp_req.set_timeout(timeout.unwrap_or(DEFAULT_RESPONSE_DEADLINE));
+        tmp_req.set_timeout(timeout);
         // decompose into parts to get complete grpc metadata
         let (grpc_metadata, _, _) = tmp_req.into_parts();
         // create the client
         #[cfg(not(target_arch = "wasm32"))]
         let client = {
-            let endpoint = if domain.is_some() && tls_ca_pem.is_some() && tls_enabled {
-                let ca_certificate = tonic::transport::Certificate::from_pem(tls_ca_pem.unwrap());
-                let tls_config = tonic::transport::ClientTlsConfig::new()
-                    .domain_name(domain.unwrap())
-                    .ca_certificate(ca_certificate);
-                let addr = format!("https://{addr}");
-                tonic::transport::Channel::from_shared(addr)
-                    .map_err(|_e| ClientError::InvalidUrl)?
-                    .tls_config(tls_config)?
-            } else {
-                let addr = format!("http://{addr}");
-                tonic::transport::Channel::from_shared(addr)
-                    .map_err(|_e| ClientError::InvalidUrl)?
-            };
-            let channel = endpoint.connect().await?;
+            let endpoint =
+                if self.domain.is_some() && self.tls_ca_pem.is_some() && self.tls_enabled {
+                    let domain = self.domain.clone().unwrap();
+                    let tls_ca_pem = self.tls_ca_pem.clone().unwrap();
+                    let ca_certificate = tonic::transport::Certificate::from_pem(tls_ca_pem);
+                    let tls_config = tonic::transport::ClientTlsConfig::new()
+                        .domain_name(domain)
+                        .ca_certificate(ca_certificate);
+                    let addr = format!("https://{addr}");
+                    tonic::transport::Channel::from_shared(addr)
+                        .map_err(|_e| ClientError::InvalidUrl)?
+                        .tls_config(tls_config)?
+                } else {
+                    let addr = format!("http://{addr}");
+                    tonic::transport::Channel::from_shared(addr)
+                        .map_err(|_e| ClientError::InvalidUrl)?
+                }
+                .connect_timeout(timeout);
+            let channel = endpoint.connect_lazy();
             crate::pb::rtc_signalling_client::RtcSignallingClient::new(channel)
         };
         #[cfg(target_arch = "wasm32")]
         let client = {
-            if domain.is_some() || tls_ca_pem.is_some() {
+            if self.domain.is_some() || self.tls_ca_pem.is_some() {
                 warn!("Signalling client domain/tls settings are ignored! Client TLS is handled by the browser.");
             }
-            let addr = if tls_enabled {
+            let addr = if self.tls_enabled {
                 format!("https://{addr}")
             } else {
                 format!("http://{addr}")
@@ -359,168 +755,35 @@ impl RtcSignallingClient {
             let client = tonic_web_wasm_client::Client::new(addr);
             crate::pb::rtc_signalling_client::RtcSignallingClient::new(client)
         };
-        // advertise local peer
-        // return connected client
-        Ok(Self {
+
+        Ok(RtcSignallingClient {
             grpc_metadata,
-            inner: client,
+            inner: Mutex::new(client),
         })
     }
+}
 
-    /// Runs the signalling client
+impl RtcSignallingClient {
+    /// Start a new signalling peer
     ///
-    /// Operates the signalling chain:
-    /// advertising self, listening for offers/answers, discovering peers, and performing offer/answer signalling.
-    ///
-    /// The externally provided callback functions are called concurrently on the local thread.
-    pub async fn run<A, O, C, E>(
-        &mut self,
-        create_offer_fn: impl Fn(u64) -> CreateOfferFut<O, C, E>,
-        receive_answer_fn: impl Fn(SignalSet<A, C>) -> ReceiveAnswerFut<E>,
-        local_sig_cplt_fn: impl Fn(u64) -> LocalSigCpltFut<E>,
-        receive_offer_fn: impl Fn(SignalSet<O, C>) -> ReceiveOfferFut<A, C, E>,
-        remote_sig_cplt_fn: impl Fn(u64) -> RemoteSigCpltFut<E>,
-    ) -> ClientResult<()>
+    /// Connects the peer and returns [`RtcSignallingPeer`]
+    pub async fn start_peer<A, O, C>(&self) -> ClientResult<RtcSignallingPeer<A, O, C>>
     where
-        A: serde::Serialize + serde::de::DeserializeOwned,
-        O: serde::Serialize + serde::de::DeserializeOwned,
-        C: serde::Serialize + serde::de::DeserializeOwned,
-        ClientError: From<E>,
+        A: serde::Serialize + serde::de::DeserializeOwned + 'static,
+        O: serde::Serialize + serde::de::DeserializeOwned + 'static,
+        C: serde::Serialize + serde::de::DeserializeOwned + 'static,
     {
-        let id = self.advertise().await?;
-        let peer_listener = self.open_peer_listener(id).await?;
-        let offer_listener = self.open_offer_listener(id).await?;
-        let answer_listener = self.open_answer_listener(id).await?;
-        // create futures to run initially
-        let peer_listener_fut = peer_listener_task(peer_listener).fuse();
-        let offer_listener_fut = offer_listener_task(offer_listener).fuse();
-        let answer_listener_fut = answer_listener_task(answer_listener).fuse();
-        pin_mut!(peer_listener_fut, offer_listener_fut, answer_listener_fut);
-        // create empty sets of futures to run later
-        let mut create_offer_futs = FuturesUnordered::new();
-        let mut receive_answer_futs = FuturesUnordered::new();
-        let mut local_sig_cplt_futs = FuturesUnordered::new();
-        let mut receive_offer_futs = FuturesUnordered::new();
-        let mut remote_sig_cplt_futs = FuturesUnordered::new();
-        // init empty list of discovered peers
-        let mut discovered_peers: HashSet<u64> = HashSet::new();
-        let mut first_discovery = true;
-        debug!("signalling loop start");
-        // concurrent signalling loop
-        loop {
-            select! {
-                // Start of "local" signalling chain
-                // PeerListener receives a list of remote peers.
-                // On first iteration, for each remote peer, create a local peer connection...
-                result = peer_listener_fut => {
-                    let (listener, peer_changes) = result?;
-                    debug!("peer listener task completed ({id:#016x})");
-                    // reset peer listener future
-                    peer_listener_fut.set(peer_listener_task(listener).fuse());
-                    // apply peer changes to discovered peers map
-                    for peer_change in peer_changes.iter() {
-                        match peer_change.change() {
-                            Change::PeerChangeAdd => {
-                                if discovered_peers.insert(peer_change.id) {
-                                    info!("Discovered peer ({:#016x}).", peer_change.id);
-                                } else {
-                                    warn!("Rediscovered peer ({:#016x}). Local discovered peers is out of sync!", peer_change.id);
-                                }
-                            },
-                            Change::PeerChangeRemove => {
-                                if discovered_peers.remove(&peer_change.id) {
-                                    warn!("Remote peer ({:#016x}) dropped by signalling. Existing connections with this peer will dangle.", peer_change.id);
-                                } else {
-                                    warn!("Undiscovered remote peer ({:#016x}) dropped by signalling. Local discovered peers is out of sync!", peer_change.id);
-                                }
-                            },
-                        }
-                    }
-                    // if this is the first discovery, queue creation of offers for each remote peer (creates local peer connections)
-                    if first_discovery {
-                        first_discovery = false;
-                        let create_offer_tasks = peer_changes.iter()
-                            .filter_map(|peer_change|
-                                if peer_change.change() == Change::PeerChangeAdd {
-                                    let remote_id = peer_change.id;
-                                    info!("starting local signalling chain. (remote: {remote_id:#016x}");
-                                    Some(create_offer_fn(remote_id))
-                                } else {
-                                    None
-                                }
-                            );
-                        create_offer_futs.extend(create_offer_tasks);
-                    }
-                },
-                // Local peer connections generate offers...
-                // Offers are signalled to the remote peers...
-                result = create_offer_futs.select_next_some() => {
-                    debug!("create offer task completed ({id:#016x})");
-                    let offer_set = result?;
-                    // perform signalling of offer
-                    let remote_id = self.signal_offer(id, offer_set.remote_id, offer_set.desc, offer_set.candidates).await?;
-                    debug!("signalling of offer completed ({id:#016x})");
-                    info!("offer signalled to peer. (remote peer: {remote_id:#016x})");
-                    // do nothing, local signalling chain continues when answer listener receives an answer
-                },
-                // Listen for answers from the remote peers...
-                result = answer_listener_fut => {
-                    let (listener, answer_set) = result?;
-                    debug!("answer listener task completed ({id:#016x})");
-                    // reset answer listener future
-                    answer_listener_fut.set(answer_listener_task(listener).fuse());
-                    // queue receive answer
-                    receive_answer_futs.push(receive_answer_fn(answer_set));
-                },
-                // We wait to receive answer responses from the remote peers,
-                // Completing a "local" signalling chain.
-                // And start a local signalling chain complete handler.
-                result = receive_answer_futs.select_next_some() => {
-                    let remote_id = result?;
-                    debug!("receive answer task completed ({id:#016x})");
-                    info!("local signalling chain complete. (remote peer: {remote_id:#016x})");
-                    // queue local signalling complete handler
-                    local_sig_cplt_futs.push(local_sig_cplt_fn(remote_id));
-                },
-                // Finally, the local signalling chain complete hander exits
-                result = local_sig_cplt_futs.select_next_some() => {
-                    let remote_id = result?;
-                    info!("local signalling handler complete. (remote peer: {remote_id:#016x})");
-                },
-
-                // Start of a "remote" signalling chain
-                // OfferListener receives a remote offer.
-                result = offer_listener_fut => {
-                    let (listener, offer_set) = result?;
-                    debug!("offer listener task completed ({id:#016x})");
-                    // reset offer listener future
-                    offer_listener_fut.set(offer_listener_task(listener).fuse());
-                    // queue receive offer
-                    receive_offer_futs.push(receive_offer_fn(offer_set));
-                },
-                // This offer is used to create a remote peer connection and generate an answer...
-                // The answer is sent to the remote offerer,
-                // Completing a "remote" signalling chain.
-                // And starting a remote signalling chain complete handler.
-                result = receive_offer_futs.select_next_some() => {
-                    debug!("receive offer task completed ({id:#016x})");
-                    let answer_set = result?;
-                    // perform signalling of answer
-                    let remote_id = self.signal_answer(id, answer_set.remote_id, answer_set.desc, answer_set.candidates).await?;
-                    debug!("signalling of answer completed ({id:#016x})");
-                    trace!("remote signalling chain complete. (remote peer: {remote_id:#016x})");
-                    // queue remote signalling complete handler
-                    remote_sig_cplt_futs.push(remote_sig_cplt_fn(remote_id));
-                },
-                // Finally, the remote signalling chain complete handler exits
-                result = remote_sig_cplt_futs.select_next_some() => {
-                    let remote_id = result?;
-                    info!("remote signalling handler complete. (remote peer: {remote_id:#016x})");
-                },
-                complete => break,
-            }
-        }
-
-        Ok(())
+        let local_id = self.advertise().await?;
+        let peer_listener = self.open_peer_listener(local_id).await?;
+        let offer_listener = self.open_offer_listener(local_id).await?;
+        let answer_listener = self.open_answer_listener(local_id).await?;
+        let signalling_peer = RtcSignallingPeer::new(
+            local_id,
+            peer_listener,
+            offer_listener,
+            answer_listener,
+            self,
+        );
+        Ok(signalling_peer)
     }
 }

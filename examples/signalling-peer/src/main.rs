@@ -1,7 +1,7 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
 
 use anyhow::{anyhow, Result};
-use futures_util::{FutureExt, StreamExt};
+use futures_util::StreamExt;
 use log::info;
 
 use just_webrtc::{
@@ -9,13 +9,10 @@ use just_webrtc::{
     types::{DataChannelOptions, ICECandidate, SessionDescription},
     DataChannelExt, PeerConnectionBuilder, PeerConnectionExt,
 };
-use just_webrtc_signalling::client::RtcSignallingClient;
+use just_webrtc_signalling::client::RtcSignallingClientBuilder;
 
 const ECHO_REQUEST: &str = "I'm literally Ryan Gosling.";
 const ECHO_RESPONSE: &str = "I know right! He's literally me.";
-
-// fill signal set generics
-type SignalSet = just_webrtc_signalling::client::SignalSet<SessionDescription, Vec<ICECandidate>>;
 
 async fn peer_echo_task(remote_id: u64, mut peer_connection: PeerConnection) -> Result<u64> {
     info!("started peer echo task. ({remote_id})");
@@ -57,9 +54,9 @@ async fn peer_echo_task(remote_id: u64, mut peer_connection: PeerConnection) -> 
     }
 }
 
-async fn create_offer(remote_id: u64) -> Result<(SignalSet, PeerConnection)> {
+async fn create_offer() -> Result<((SessionDescription, Vec<ICECandidate>), PeerConnection)> {
     let channel_options = vec![(
-        format!("rtc_channel_to_{remote_id:#016x}_"),
+        "example_channel_".to_string(),
         DataChannelOptions::default(),
     )];
     let mut local_peer_connection = PeerConnectionBuilder::new()
@@ -71,49 +68,37 @@ async fn create_offer(remote_id: u64) -> Result<(SignalSet, PeerConnection)> {
         .await
         .ok_or(anyhow!("could not get local description!"))?;
     let candidates = local_peer_connection.collect_ice_candidates().await?;
-    let signal = SignalSet {
-        desc: offer,
-        candidates,
-        remote_id,
-    };
-    Ok((signal, local_peer_connection))
+    Ok(((offer, candidates), local_peer_connection))
 }
 
-async fn receive_offer(offer_set: SignalSet) -> Result<(SignalSet, PeerConnection)> {
+async fn receive_offer(
+    offer: SessionDescription,
+    candidates: Vec<ICECandidate>,
+) -> Result<((SessionDescription, Vec<ICECandidate>), PeerConnection)> {
     let mut remote_peer_connection = PeerConnectionBuilder::new()
-        .with_remote_offer(Some(offer_set.desc))?
+        .with_remote_offer(Some(offer))?
         .build()
         .await?;
     remote_peer_connection
-        .add_ice_candidates(offer_set.candidates)
+        .add_ice_candidates(candidates)
         .await?;
     let answer = remote_peer_connection
         .get_local_description()
         .await
         .ok_or(anyhow!("could not get remote description!"))?;
     let candidates = remote_peer_connection.collect_ice_candidates().await?;
-    let remote_id = offer_set.remote_id;
-    let answer_set = SignalSet {
-        desc: answer,
-        candidates,
-        remote_id,
-    };
-    Ok((answer_set, remote_peer_connection))
+    Ok(((answer, candidates), remote_peer_connection))
 }
 
 async fn receive_answer(
-    answer_set: SignalSet,
-    local_peer_connection: PeerConnection,
-) -> Result<(u64, PeerConnection)> {
-    let remote_id = answer_set.remote_id;
+    answer: SessionDescription,
+    candidates: Vec<ICECandidate>,
+    local_peer_connection: &PeerConnection,
+) -> Result<()> {
     // set answer description and add candidates
-    local_peer_connection
-        .set_remote_description(answer_set.desc)
-        .await?;
-    local_peer_connection
-        .add_ice_candidates(answer_set.candidates)
-        .await?;
-    Ok((remote_id, local_peer_connection))
+    local_peer_connection.set_remote_description(answer).await?;
+    local_peer_connection.add_ice_candidates(candidates).await?;
+    Ok(())
 }
 
 /// Peer connection map for passing connections between callback functions
@@ -156,75 +141,77 @@ async fn run_peer(addr: &str) -> Result<()> {
     // create locally shared peer connections map
     let peer_connections: Rc<RefCell<PeerConnectionMap>> =
         Rc::new(RefCell::new(PeerConnectionMap::default()));
-    // prepare create offer callback function
-    let create_offer_fn = |remote_id| {
-        let peer_connections = peer_connections.clone();
+    // prepare create offer callback closure
+    let peer_connections_offer = peer_connections.clone();
+    let create_offer_fn = move |remote_id: u64| {
+        let peer_connections = peer_connections_offer.clone();
         async move {
-            let (offer, local_peer_connection) = create_offer(remote_id).await?;
+            let (offer_set, local_peer_connection) = create_offer().await?;
             peer_connections
                 .borrow_mut()
                 .insert(remote_id, local_peer_connection)?;
-            Ok(offer)
+            Ok::<_, anyhow::Error>((remote_id, offer_set))
         }
-        .boxed_local()
     };
-    // prepare receive answer callback function
-    let receive_answer_fn = |answer_set: SignalSet| {
-        let peer_connections = peer_connections.clone();
+    // prepare receive answer callback closure
+    let peer_connections_answer = peer_connections.clone();
+    let receive_answer_fn = move |remote_id, (answer, candidates)| {
+        let peer_connections = peer_connections_answer.clone();
         async move {
-            let peer_connection = peer_connections.borrow_mut().take(&answer_set.remote_id)?;
-            let (remote_id, peer_connection) = receive_answer(answer_set, peer_connection).await?;
+            let peer_connection = peer_connections.borrow_mut().take(&remote_id)?;
+            receive_answer(answer, candidates, &peer_connection).await?;
             peer_connections
                 .borrow_mut()
                 .place(&remote_id, peer_connection)?;
-            Ok(remote_id)
+            Ok::<_, anyhow::Error>(remote_id)
         }
-        .boxed_local()
     };
-    // prepare local signalling complete callback function
-    let local_sig_cplt_fn = |remote_id| {
-        let peer_connections = peer_connections.clone();
+    // prepare local signalling complete callback closure
+    let peer_connections_local = peer_connections.clone();
+    let local_sig_cplt_fn = move |remote_id| {
+        let peer_connections = peer_connections_local.clone();
         async move {
             let local_peer_connection = peer_connections.borrow_mut().take(&remote_id)?;
             peer_echo_task(remote_id, local_peer_connection).await
         }
-        .boxed_local()
     };
-    // prepare receive offer callback function
-    let receive_offer_fn = |offer_set| {
-        let peer_connections = peer_connections.clone();
+    // prepare receive offer callback closure
+    let peer_connections_offer = peer_connections.clone();
+    let receive_offer_fn = move |remote_id: u64, (offer, candidates)| {
+        let peer_connections = peer_connections_offer.clone();
         async move {
-            let (answer, remote_peer_connection) = receive_offer(offer_set).await?;
+            let (answer_set, remote_peer_connection) = receive_offer(offer, candidates).await?;
             peer_connections
                 .borrow_mut()
-                .insert(answer.remote_id, remote_peer_connection)?;
-            Ok(answer)
+                .insert(remote_id, remote_peer_connection)?;
+            Ok::<_, anyhow::Error>((remote_id, answer_set))
         }
-        .boxed_local()
     };
-    // prepare remote signalling complete callback function
-    let remote_sig_cplt_fn = |remote_id| {
-        let peer_connections = peer_connections.clone();
+    // prepare remote signalling complete callback closure
+    let peer_connections_remote = peer_connections.clone();
+    let remote_sig_cplt_fn = move |remote_id| {
+        let peer_connections = peer_connections_remote.clone();
         async move {
             let remote_peer_connection = peer_connections.borrow_mut().take(&remote_id)?;
             peer_echo_task(remote_id, remote_peer_connection).await
         }
-        .boxed_local()
     };
-    // create signalling client
-    let mut signalling_client =
-        RtcSignallingClient::connect(addr.to_string(), None, false, None, None).await?;
-    // run signalling client
-    signalling_client
-        .run(
-            create_offer_fn,
-            receive_answer_fn,
-            local_sig_cplt_fn,
-            receive_offer_fn,
-            remote_sig_cplt_fn,
-        )
-        .await?;
-    Ok(())
+
+    // build signalling client
+    let signalling_client = RtcSignallingClientBuilder::default().build(addr.to_string())?;
+    let mut signalling_peer = signalling_client.start_peer().await?;
+    // set callbacks
+    signalling_peer
+        .set_on_create_offer(create_offer_fn)
+        .set_on_receive_answer(receive_answer_fn)
+        .set_on_local_sig_cplt(local_sig_cplt_fn)
+        .set_on_receive_offer(receive_offer_fn)
+        .set_on_remote_sig_cplt(remote_sig_cplt_fn);
+
+    // run signalling peer
+    loop {
+        signalling_peer.step().await?;
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

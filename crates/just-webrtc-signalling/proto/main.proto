@@ -31,6 +31,11 @@ message AdvertiseRsp {
     PeerId local_peer = 1;
 }
 
+message TeardownReq {
+    PeerId local_peer = 1;
+}
+message TeardownRsp {}
+
 message PeerDiscoverReq {
     PeerId local_peer = 1;
 }
@@ -73,8 +78,10 @@ message AnswerListenerRsp {
 }
 
 service RtcSignalling {
-    // Advertise self as a peer
+    // Advertise a new peer
     rpc Advertise(AdvertiseReq) returns (AdvertiseRsp) {}
+    // Teardown a peer
+    rpc Teardown(TeardownReq) returns (TeardownRsp) {}
     // Discover all peers
     rpc PeerDiscover(PeerDiscoverReq) returns (PeerDiscoverRsp) {}
     // Open stream of peer discoveries

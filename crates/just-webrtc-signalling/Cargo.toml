@@ -1,6 +1,6 @@
 [package]
 name = "just-webrtc-signalling"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 authors = ["Reece Kibble <reecek@uniciant.com>"]
 categories = ["network-programming", "web-programming", "wasm", "game-development"]
@@ -28,8 +28,8 @@ tonic-web-wasm-client = { version = "0.5.1", optional = true }    # transport la
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tonic = { version = "0.11.0", default-features = false, features = ["prost", "codegen", "transport", "tls"], optional = true }  # include native transport layer
-tokio-stream = { version = "0.1.14", optional = true }
-tokio = { version = "1.36", features = ["sync"], optional = true }
+flume = { version = "0.11.0", default-features = false, features = ["async"], optional = true }
+async-broadcast = { version = "0.7.0", optional = true }
 async-stream = { version = "0.3.5", optional = true }
 tower-http = { version = "0.4", features = ["cors"], optional = true }
 http = { version = "0.2.12", optional = true }
@@ -40,13 +40,15 @@ tonic-build = { version = "0.11.0", default-features = false, features = ["prost
 
 [dev-dependencies]
 anyhow = "1.0"
+pretty_env_logger = "0.5"
+tokio = { version = "1.36", features = ["rt", "macros"] }
 
 [features]
 default = ["server", "server-web", "client"]
 server = [
     "dep:tonic",
-    "dep:tokio",
-    "dep:tokio-stream",
+    "dep:flume",
+    "dep:async-broadcast",
     "dep:async-stream",
     "dep:log",
     "dep:futures-util",
