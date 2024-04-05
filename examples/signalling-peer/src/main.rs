@@ -202,7 +202,7 @@ async fn run_peer(addr: &str) -> Result<()> {
     };
 
     // build signalling client
-    let mut signalling_client = RtcSignallingClientBuilder::default()
+    let signalling_client = RtcSignallingClientBuilder::default()
         .build(addr.to_string())?;
     let mut signalling_peer = signalling_client.start_peer().await?;
     // set callbacks
@@ -215,7 +215,7 @@ async fn run_peer(addr: &str) -> Result<()> {
 
     // run signalling peer
     loop {
-        signalling_peer.step(&mut signalling_client).await?;
+        signalling_peer.step().await?;
     }
 }
 
