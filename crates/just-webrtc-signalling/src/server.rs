@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     pin::Pin,
-    sync::{atomic::AtomicU64, Arc, RwLock},
+    sync::{atomic::AtomicU64, Arc, OnceLock, RwLock},
     time::Duration,
 };
 
@@ -17,37 +17,16 @@ use crate::pb::{
     rtc_signalling_server::{RtcSignalling, RtcSignallingServer},
     AdvertiseReq, AdvertiseRsp, AnswerListenerReq, AnswerListenerRsp, OfferListenerReq,
     OfferListenerRsp, PeerChange, PeerDiscoverReq, PeerDiscoverRsp, PeerId, PeerListenerReq,
-    PeerListenerRsp, SignalAnswerReq, SignalAnswerRsp, SignalOfferReq, SignalOfferRsp,
+    PeerListenerRsp, SignalAnswerReq, SignalAnswerRsp, SignalOfferReq, SignalOfferRsp, TeardownReq,
+    TeardownRsp,
 };
 
 static GENERATOR: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct Listeners {
-    offer_listener_tx: flume::Sender<Result<OfferListenerRsp>>,
-    offer_listener_rx: flume::Receiver<Result<OfferListenerRsp>>,
-    answer_listener_tx: flume::Sender<Result<AnswerListenerRsp>>,
-    answer_listener_rx: flume::Receiver<Result<AnswerListenerRsp>>,
-}
-
-impl Listeners {
-    pub fn new() -> Self {
-        let (offer_listener_tx, offer_listener_rx) = flume::bounded(16);
-        let (answer_listener_tx, answer_listener_rx) = flume::bounded(16);
-        // load channels with initial empty responses
-        answer_listener_tx
-            .try_send(Ok(AnswerListenerRsp::default()))
-            .unwrap();
-        offer_listener_tx
-            .try_send(Ok(OfferListenerRsp { offer_signal: None }))
-            .unwrap();
-        Self {
-            offer_listener_tx,
-            offer_listener_rx,
-            answer_listener_tx,
-            answer_listener_rx,
-        }
-    }
+    offer_listener_tx: OnceLock<flume::Sender<Result<OfferListenerRsp>>>,
+    answer_listener_tx: OnceLock<flume::Sender<Result<AnswerListenerRsp>>>,
 }
 
 /// Mapped signalling channels
@@ -68,6 +47,23 @@ impl Signalling {
             peer_broadcast_tx: tx,
             peer_broadcast_rx: rx,
         }
+    }
+
+    /// Private teardown handler
+    fn handle_teardown(&self, id: u64) -> Result<()> {
+        // transmit change to peer listeners
+        let peer_changes = vec![PeerChange::remove(id)];
+        let message = Ok(PeerListenerRsp { peer_changes });
+        match self.peer_broadcast_tx.try_broadcast(message) {
+            Ok(_) => debug!("broadcast peer teardown to listeners"),
+            Err(_) => warn!("no active peer listeners!"),
+        };
+        // remove peer from peers map
+        let mut peers = self.peers.write().unwrap();
+        peers
+            .remove(&id)
+            .ok_or(Status::failed_precondition("peer ID not advertised!"))?;
+        Ok(())
     }
 }
 
@@ -103,7 +99,7 @@ impl RtcSignalling for RtcSignallingService {
             if peers.contains_key(&id) {
                 return Err(Status::internal("generated duplicate ID!"));
             }
-            peers.insert(id, Listeners::new());
+            peers.insert(id, Listeners::default());
             id
         };
         // transmit change to peer listeners
@@ -118,6 +114,17 @@ impl RtcSignalling for RtcSignallingService {
         Ok(Response::new(AdvertiseRsp {
             local_peer: Some(PeerId { id }),
         }))
+    }
+
+    async fn teardown(&self, request: Request<TeardownReq>) -> Result<Response<TeardownRsp>> {
+        let local_peer = request
+            .into_inner()
+            .local_peer
+            .ok_or(Status::invalid_argument("missing local peer ID"))?;
+        let id = local_peer.id;
+        self.inner.handle_teardown(id)?;
+        debug!("received teardown request ({id:#016x})");
+        Ok(Response::new(TeardownRsp {}))
     }
 
     async fn peer_discover(
@@ -193,22 +200,32 @@ impl RtcSignalling for RtcSignallingService {
         let offerer_id = offer_signal.offerer_id;
         debug!("received signal offer request ({offerer_id:#016x})");
         // transmit offer to listener
-        let peers = self.inner.peers.read().unwrap();
-        let peer = peers
-            .get(&answerer_id)
-            .ok_or(Status::failed_precondition("answerer peer not advertised!"))?;
-        let message = Ok(OfferListenerRsp {
-            offer_signal: Some(offer_signal),
-        });
-        match peer.offer_listener_tx.try_send(message) {
+        let result = {
+            let peers = self.inner.peers.read().unwrap();
+            let peer = peers
+                .get(&answerer_id)
+                .ok_or(Status::failed_precondition("answerer peer not advertised!"))?;
+            let message = Ok(OfferListenerRsp {
+                offer_signal: Some(offer_signal),
+            });
+            peer.offer_listener_tx
+                .get()
+                .ok_or(Status::failed_precondition("answerer peer not listening!"))?
+                .try_send(message)
+        };
+        match result {
             Ok(_) => {
                 info!("offer signal forwarded to answerer peer ({answerer_id:#016x})");
                 Ok(Response::new(SignalOfferRsp {}))
             }
-            Err(flume::TrySendError::Disconnected(_message)) => {
-                Err(Status::internal("offer listener receiver was dropped!"))
+            Err(flume::TrySendError::Disconnected(_result)) => {
+                // drop the peer
+                self.inner.handle_teardown(answerer_id)?;
+                Err(Status::failed_precondition(
+                    "answerer peer has disconnected!",
+                ))
             }
-            Err(flume::TrySendError::Full(_message)) => {
+            Err(flume::TrySendError::Full(_result)) => {
                 Err(Status::aborted("offer listener buffer full!"))
             }
         }
@@ -229,8 +246,18 @@ impl RtcSignalling for RtcSignallingService {
         let peer = peers
             .get(&local_peer.id)
             .ok_or(Status::failed_precondition("listener peer not advertised!"))?;
+        // create new spsc channel
+        let (offer_listener_tx, offer_listener_rx) = flume::bounded(16);
+        // load channel with initial empty response
+        offer_listener_tx
+            .try_send(Ok(OfferListenerRsp { offer_signal: None }))
+            .unwrap();
+        // give tx side to peer map
+        peer.offer_listener_tx
+            .set(offer_listener_tx)
+            .map_err(|_| Status::failed_precondition("offer listener already exists!"))?;
         // return new receiver stream
-        Ok(Response::new(peer.offer_listener_rx.clone().into_stream()))
+        Ok(Response::new(offer_listener_rx.into_stream()))
     }
     type OpenOfferListenerStream = flume::r#async::RecvStream<'static, Result<OfferListenerRsp>>;
 
@@ -248,21 +275,31 @@ impl RtcSignalling for RtcSignallingService {
             .ok_or(Status::invalid_argument("missing answer signal"))?;
         let answerer_id = answer_signal.answerer_id;
         debug!("received signal answer request ({answerer_id:#016x})");
-        // deliver answer to offerer peer
-        let peers = self.inner.peers.read().unwrap();
-        let peer = peers
-            .get(&offerer_id)
-            .ok_or(Status::failed_precondition("answerer peer not advertised!"))?;
-        let message = Ok(AnswerListenerRsp {
-            answer_signal: Some(answer_signal),
-        });
-        match peer.answer_listener_tx.try_send(message) {
+        // transmit answer to offerer peer
+        let result = {
+            let peers = self.inner.peers.read().unwrap();
+            let peer = peers
+                .get(&offerer_id)
+                .ok_or(Status::failed_precondition("offerer peer not advertised!"))?;
+            let message = Ok(AnswerListenerRsp {
+                answer_signal: Some(answer_signal),
+            });
+            peer.answer_listener_tx
+                .get()
+                .ok_or(Status::failed_precondition("offerer peer not listening!"))?
+                .try_send(message)
+        };
+        match result {
             Ok(_) => {
                 info!("answer signal forwarded to offerer peer ({offerer_id:#016x})");
                 Ok(Response::new(SignalAnswerRsp {}))
             }
             Err(flume::TrySendError::Disconnected(_message)) => {
-                Err(Status::internal("answer listener receiver was dropped!"))
+                // drop the peer
+                self.inner.handle_teardown(offerer_id)?;
+                Err(Status::failed_precondition(
+                    "offerer peer has disconnected!",
+                ))
             }
             Err(flume::TrySendError::Full(_message)) => {
                 Err(Status::aborted("answer listener buffer full!"))
@@ -285,8 +322,20 @@ impl RtcSignalling for RtcSignallingService {
         let peer = peers
             .get(&local_peer.id)
             .ok_or(Status::failed_precondition("listener peer not advertised!"))?;
+        // create new spsc channel
+        let (answer_listener_tx, answer_listener_rx) = flume::bounded(16);
+        // load channel with initial empty response
+        answer_listener_tx
+            .try_send(Ok(AnswerListenerRsp {
+                answer_signal: None,
+            }))
+            .unwrap();
+        // give tx side to peer map
+        peer.answer_listener_tx
+            .set(answer_listener_tx)
+            .map_err(|_| Status::failed_precondition("answer listener already exists!"))?;
         // return stream
-        Ok(Response::new(peer.answer_listener_rx.clone().into_stream()))
+        Ok(Response::new(answer_listener_rx.into_stream()))
     }
     type OpenAnswerListenerStream = flume::r#async::RecvStream<'static, Result<AnswerListenerRsp>>;
 }
@@ -383,7 +432,7 @@ impl PeerChange {
     }
 
     /// Create new peer change as removal
-    fn _remove(id: u64) -> Self {
+    fn remove(id: u64) -> Self {
         Self {
             id,
             change: crate::pb::Change::PeerChangeRemove as i32,
