@@ -12,7 +12,7 @@ use tonic::{metadata::MetadataMap, Extensions, Request, Streaming};
 use crate::pb::{
     AdvertiseReq, AnswerListenerReq, AnswerListenerRsp, Change, OfferListenerReq, OfferListenerRsp,
     PeerChange, PeerDiscoverReq, PeerId, PeerListenerReq, PeerListenerRsp, SignalAnswer,
-    SignalAnswerReq, SignalOffer, SignalOfferReq,
+    SignalAnswerReq, SignalOffer, SignalOfferReq, TeardownReq,
 };
 
 /// Default deadline for gRPC method response (10 seconds)
@@ -36,15 +36,9 @@ pub enum ClientError {
     /// Bincode encoding/decoding error
     #[error(transparent)]
     Bincode(#[from] bincode::Error),
-    /// Pre-existing peer connection error
-    #[error("Pre-existing connection with peer!")]
-    PreExistingPeerConnection,
     /// Listener closed error
     #[error("Listener closed unexpectedly!")]
     ListenerClosed,
-    /// Listener unavailable error
-    #[error("Listener unavailable!")]
-    ListenerUnavailable,
     /// Invalid URL error
     #[error("Invalid URL")]
     InvalidUrl,
@@ -322,6 +316,17 @@ where
         self
     }
 
+    /// Get the local ID of this peer
+    pub fn id(&self) -> u64 {
+        self.local_id
+    }
+
+    /// Close and consume the signalling peer
+    pub async fn close(self) -> ClientResult<()> {
+        self.client.teardown(self.local_id).await?;
+        Ok(())
+    }
+
     /// Step the concurrent state machine of the signalling peer
     pub async fn step(&mut self) -> ClientResult<()> {
         let id = self.local_id;
@@ -345,14 +350,23 @@ where
                             if self.discovered_peers.insert(peer_change.id) {
                                 info!("Discovered peer ({:#016x}).", peer_change.id);
                             } else {
-                                warn!("Rediscovered peer ({:#016x}). Local discovered peers is out of sync!", peer_change.id);
+                                warn!(
+                                    "Rediscovered peer ({:#016x}). Synchronising...",
+                                    peer_change.id
+                                );
+                                // overwrite local list of discovered peers
+                                self.discovered_peers =
+                                    self.client.peer_discover(id).await?.into_iter().collect();
                             }
                         }
                         Change::PeerChangeRemove => {
                             if self.discovered_peers.remove(&peer_change.id) {
                                 warn!("Remote peer ({:#016x}) dropped by signalling. Existing connections with this peer will dangle.", peer_change.id);
                             } else {
-                                warn!("Undiscovered remote peer ({:#016x}) dropped by signalling. Local discovered peers is out of sync!", peer_change.id);
+                                warn!("Undiscovered remote peer ({:#016x}) dropped by signalling. Synchronising...", peer_change.id);
+                                // overwrite local list of discovered peers
+                                self.discovered_peers =
+                                    self.client.peer_discover(id).await?.into_iter().collect();
                             }
                         }
                     }
@@ -378,10 +392,25 @@ where
             SignallingState::CreateOffer(remote_id, (offer, candidates)) => {
                 debug!("create offer task completed ({id:#016x})");
                 // perform signalling of offer
-                let remote_id = self
+                let result = self
                     .client
                     .signal_offer(id, remote_id, offer, candidates)
-                    .await?;
+                    .await;
+                // handle peer disconnected result
+                let remote_id = match result {
+                    Ok(remote_id) => remote_id,
+                    Err(ClientError::TonicStatus(status)) => match status.code() {
+                        tonic::Code::FailedPrecondition => {
+                            warn!(
+                                "could not signal offer to peer ({remote_id:#016x}): {}",
+                                status.message()
+                            );
+                            return Ok(());
+                        }
+                        _ => return Err(ClientError::TonicStatus(status)),
+                    },
+                    Err(e) => return Err(e),
+                };
                 debug!("signalling of offer completed ({id:#016x})");
                 info!("offer signalled to peer. (remote peer: {remote_id:#016x})");
                 // do nothing, local signalling chain continues when answer listener receives an answer
@@ -430,10 +459,25 @@ where
             SignallingState::ReceiveOffer(remote_id, (answer, candidates)) => {
                 debug!("receive offer task completed ({id:#016x})");
                 // perform signalling of answer
-                let remote_id = self
+                let result = self
                     .client
                     .signal_answer(id, remote_id, answer, candidates)
-                    .await?;
+                    .await;
+                // handle peer disconnected result
+                let remote_id = match result {
+                    Ok(remote_id) => remote_id,
+                    Err(ClientError::TonicStatus(status)) => match status.code() {
+                        tonic::Code::FailedPrecondition => {
+                            warn!(
+                                "could not signal answer to peer ({remote_id:#016x}): {}",
+                                status.message()
+                            );
+                            return Ok(());
+                        }
+                        _ => return Err(ClientError::TonicStatus(status)),
+                    },
+                    Err(e) => return Err(e),
+                };
                 debug!("signalling of answer completed ({id:#016x})");
                 info!("remote signalling chain complete. (remote peer: {remote_id:#016x})");
                 // queue remote signalling complete handler
@@ -483,8 +527,21 @@ impl RtcSignallingClient {
         debug!("received advertise response ({local_id:#016x})");
         Ok(local_id)
     }
+    /// Private teardown helper method
+    async fn teardown(&self, id: u64) -> Result<(), tonic::Status> {
+        debug!("sending teardown request ({id:#016x})");
+        let request = self.build_request(TeardownReq {
+            local_peer: Some(PeerId { id }),
+        });
+        let _response = {
+            let mut client = self.inner.lock().await;
+            client.teardown(request).await?
+        };
+        debug!("received teardown response ({id:#016x})");
+        Ok(())
+    }
     /// Private peer discover helper method
-    async fn _peer_discover(&self, id: u64) -> Result<Vec<u64>, tonic::Status> {
+    async fn peer_discover(&self, id: u64) -> Result<Vec<u64>, tonic::Status> {
         debug!("sending peer discover request ({id:#016x})");
         let request = self.build_request(PeerDiscoverReq {
             local_peer: Some(PeerId { id }),
@@ -506,13 +563,9 @@ impl RtcSignallingClient {
         &self,
         id: u64,
     ) -> Result<Streaming<PeerListenerRsp>, tonic::Status> {
-        let request = Request::from_parts(
-            self.grpc_metadata.clone(),
-            Extensions::default(),
-            PeerListenerReq {
-                local_peer: Some(PeerId { id }),
-            },
-        );
+        let request = self.build_request(PeerListenerReq {
+            local_peer: Some(PeerId { id }),
+        });
         debug!("sending open peer listener request ({id:#016x})");
         let response = {
             let mut client = self.inner.lock().await;
