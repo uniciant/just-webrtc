@@ -82,17 +82,20 @@ where
     O: serde::de::DeserializeOwned,
     C: serde::de::DeserializeOwned,
 {
-    if let Some(message) = listener.message().await? {
-        if let Some(signal) = message.offer_signal {
-            let offer = bincode::deserialize(&signal.offer)?;
-            let candidates = bincode::deserialize(&signal.candidates)?;
-            Ok(SignallingState::OfferListener(listener, signal.offerer_id, (offer, candidates)))
+    // loop over empty messages
+    loop {
+        if let Some(message) = listener.message().await? {
+            if let Some(signal) = message.offer_signal {
+                let offer = bincode::deserialize(&signal.offer)?;
+                let candidates = bincode::deserialize(&signal.candidates)?;
+                return Ok(SignallingState::OfferListener(listener, signal.offerer_id, (offer, candidates)));
+            } else {
+                trace!("received empty offer message.");
+                continue;
+            }
         } else {
-            trace!("received empty offer message.");
-            offer_listener_task(listener).boxed_local().await
+            return Err(ClientError::ListenerClosed);
         }
-    } else {
-        Err(ClientError::ListenerClosed)
     }
 }
 /// Private answer listener helper method
@@ -103,17 +106,20 @@ where
     A: serde::de::DeserializeOwned,
     C: serde::de::DeserializeOwned,
 {
-    if let Some(message) = listener.message().await? {
-        if let Some(signal) = message.answer_signal {
-            let answer = bincode::deserialize(&signal.answer)?;
-            let candidates = bincode::deserialize(&signal.candidates)?;
-            Ok(SignallingState::AnswerListener(listener, signal.answerer_id, (answer, candidates)))
+    // loop over empty messages
+    loop {
+        if let Some(message) = listener.message().await? {
+            if let Some(signal) = message.answer_signal {
+                let answer = bincode::deserialize(&signal.answer)?;
+                let candidates = bincode::deserialize(&signal.candidates)?;
+                return Ok(SignallingState::AnswerListener(listener, signal.answerer_id, (answer, candidates)));
+            } else {
+                trace!("received empty answer message.");
+                continue;
+            }
         } else {
-            trace!("received empty answer message.");
-            answer_listener_task(listener).boxed_local().await
+            return Err(ClientError::ListenerClosed);
         }
-    } else {
-        Err(ClientError::ListenerClosed)
     }
 }
 
@@ -121,6 +127,10 @@ where
 type SignallingStateFut<A, O, C> = Pin<Box<dyn Future<Output = ClientResult<SignallingState<A, O, C>>>>>;
 
 /// A Just WebRTC Signalling peer
+///
+/// ### Thread-safety
+/// To avoid overhead when running peers in single-threaded environments,
+/// [`RtcSignallingPeer`] cannot be sent between threads safely.
 pub struct RtcSignallingPeer<'a, A, O, C> {
     local_id: u64,
     discovered_peers: BTreeSet<u64>,
@@ -391,14 +401,14 @@ where
                 // perform signalling of answer
                 let remote_id = self.client.signal_answer(id, remote_id, answer, candidates).await?;
                 debug!("signalling of answer completed ({id:#016x})");
-                trace!("remote signalling chain complete. (remote peer: {remote_id:#016x})");
+                info!("remote signalling chain complete. (remote peer: {remote_id:#016x})");
                 // queue remote signalling complete handler
                 self.unordered_futs.push((self.remote_sig_cplt_task)(remote_id));
             },
             // Finally, the remote signalling chain complete handler exits
             SignallingState::RemoteSigCplt(remote_id) => {
-                debug!("local signalling cplt task completed ({id:#016x})");
-                info!("local signalling handler complete. (remote peer: {remote_id:#016x})");
+                debug!("remote signalling cplt task completed ({id:#016x})");
+                info!("remote signalling handler complete. (remote peer: {remote_id:#016x})");
             },
         }
 
@@ -678,7 +688,7 @@ impl RtcSignallingClient {
     ///
     /// Connects the peer and returns [`RtcSignallingPeer`]
     pub async fn start_peer<A, O, C>(
-        &self
+        &self,
     ) -> ClientResult<RtcSignallingPeer<A, O, C>>
     where
         A: serde::Serialize + serde::de::DeserializeOwned + 'static,
