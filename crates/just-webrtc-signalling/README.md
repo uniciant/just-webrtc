@@ -45,55 +45,46 @@ For complete examples, using `just-webrtc` as the WebRTC implementation, see the
 use anyhow::Result;
 use futures_util::FutureExt;
 
-use just_webrtc_signalling::client::{RtcSignallingClient, SignalSet};
+use just_webrtc_signalling::client::RtcSignallingClientBuilder;
 
 /// run all client signalling concurrently
 async fn run_peer(server_address: String) -> Result<()> {
-    // prepare callback functions
-    let create_offer_fn = |remote_id| create_offer(remote_id).boxed_local();
-    let receive_answer_fn = |answer_set| receive_answer(answer_set).boxed_local();
-    let local_sig_cplt_fn = |remote_id| local_sig_cplt(remote_id).boxed_local();
-    let receive_offer_fn = |offer_set| receive_offer(offer_set).boxed_local();
-    let remote_sig_cplt_fn = |remote_id| remote_sig_cplt(remote_id).boxed_local();
     // create signalling client
-    let mut signalling_client = RtcSignallingClient::connect(
-        server_address,
-        None,  // default server response timeout
-        false,  // TLS disabled
-        None,  // TLS domain not specified
-        None,  // TLS certificate authority not specified
-    ).await?;
-    // run signalling client
-    signalling_client.run(
-        create_offer_fn,
-        receive_answer_fn,
-        local_sig_cplt_fn,
-        receive_offer_fn,
-        remote_sig_cplt_fn
-    ).await?;
+    let signalling_client = RtcSignallingClientBuilder::default().build(server_address)?;
+    // start a peer
+    let mut signalling_peer = signalling_client.start_peer().await?;
+    // set callbacks for the new peer
+    signalling_peer.set_on_create_offer(create_offer);
+    signalling_peer.set_on_receive_answer(receive_answer);
+    signalling_peer.set_on_local_sig_cplt(local_sig_cplt);
+    signalling_peer.set_on_receive_offer(receive_offer);
+    signalling_peer.set_on_remote_sig_cplt(remote_sig_cplt);
+    // run the signalling peer
+    loop {
+        signalling_peer.step().await?;
+    }
     Ok(())
 }
 
-// specify your WebRTC implementation's serializable session description and ICE candidate types
-type MySignalSet = SignalSet<String, String>;
+// For the purpose of this example, the descriptions and candidates will be strings.
+// In actual code, these types would be serializable types provided by the WebRTC implementation
+type Description = String;
+type ICECandidates = String;
 
 /// implement create offer callback (called by the signalling client to create an offer)
-async fn create_offer(remote_id: u64) -> Result<MySignalSet> {
+async fn create_offer(remote_id: u64) -> Result<(u64, (Description, ICECandidates))> {
     // User's WebRTC implementation creates a local peer connection here.
     // Generating an offer and ICE candidates and returning them.
     // The signalling client will deliver the signal to the remote peer with the corresponding `remote_id`
-    let offer = MySignalSet {
-        desc: String::new(),
-        candidates: String::new(),
-        remote_id,
-    };
-    Ok(offer)
+    let offer = Description::new();
+    let offerer_candidates = ICECandidates::new();
+    Ok((remote_id, (offer, offerer_candidates)))
 }
 
 /// implement receive answer callback (called by the signalling client to deliver an answer)
-async fn receive_answer(answer_set: MySignalSet) -> Result<u64> {
+async fn receive_answer(remote_id: u64, answer_set: (Description, ICECandidates)) -> Result<u64> {
     // User's WebRTC implementation receives an answer from a remote peer to a local peer connection here.
-    Ok(answer_set.remote_id)
+    Ok(remote_id)
 }
 
 /// implement 'local' (offerer peer) signalling complete callback
@@ -104,16 +95,13 @@ async fn local_sig_cplt(remote_id: u64) -> Result<u64> {
 }
 
 /// implement receive offer callback (called by the signalling client to deliver an offer and create an answer)
-async fn receive_offer(offer_set: MySignalSet) -> Result<MySignalSet> {
+async fn receive_offer(remote_id: u64, offer_set: (Description, ICECandidates)) -> Result<(u64, (Description, ICECandidates))> {
     // User's WebRTC implementation creates a remote peer connection from the remote offer and candidates here.
     // Generating an answer and ICE candidates and returning them.
     // The signalling client will deliver the signal to the remote peer with the corresponding `remote_id`
-    let answer = MySignalSet {
-        desc: String::new(),
-        candidates: String::new(),
-        remote_id: offer_set.remote_id,
-    };
-    Ok(answer)
+    let answer = Description::new();
+    let answerer_candidates = ICECandidates::new();
+    Ok((remote_id, (answer, answerer_candidates)))
 }
 
 /// implement 'remote' (answerer peer) signalling complete callback
