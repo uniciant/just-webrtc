@@ -125,6 +125,8 @@ where
 
 /// Private signalling state machine future
 type SignallingStateFut<A, O, C> = Pin<Box<dyn Future<Output = ClientResult<SignallingState<A, O, C>>>>>;
+// Private signalling state machine function
+type SignallingStateFn<A, O, C, P> = Box<dyn FnMut(P) -> SignallingStateFut<A, O, C>>;
 
 /// A Just WebRTC Signalling peer
 ///
@@ -136,11 +138,11 @@ pub struct RtcSignallingPeer<'a, A, O, C> {
     discovered_peers: BTreeSet<u64>,
     first_discovery: bool,
     // wrapped callback functions
-    create_offer_task: Box<dyn FnMut(u64) -> SignallingStateFut<A, O, C>>,
-    receive_answer_task: Box<dyn FnMut(u64, (A, C)) -> SignallingStateFut<A, O, C>>,
-    local_sig_cplt_task: Box<dyn FnMut(u64) -> SignallingStateFut<A, O, C>>,
-    receive_offer_task: Box<dyn FnMut(u64, (O, C)) -> SignallingStateFut<A, O, C>>,
-    remote_sig_cplt_task: Box<dyn FnMut(u64) -> SignallingStateFut<A, O, C>>,
+    create_offer_task: SignallingStateFn<A, O, C, u64>,
+    receive_answer_task: SignallingStateFn<A, O, C, (u64, (A, C))>,
+    local_sig_cplt_task: SignallingStateFn<A, O, C, u64>,
+    receive_offer_task: SignallingStateFn<A, O, C, (u64, (O, C))>,
+    remote_sig_cplt_task: SignallingStateFn<A, O, C, u64>,
     // queued futures
     unordered_futs: FuturesUnordered<SignallingStateFut<A, O, C>>,
     // client
@@ -185,9 +187,9 @@ where
             client,
             // default callback tasks
             create_offer_task: Box::new(|_remote_id| std::future::pending().boxed_local()),
-            receive_answer_task: Box::new(|remote_id, _answer_set| async move { Ok(SignallingState::ReceiveAnswer(remote_id)) }.boxed_local()),
+            receive_answer_task: Box::new(|(remote_id, _answer_set)| async move { Ok(SignallingState::ReceiveAnswer(remote_id)) }.boxed_local()),
             local_sig_cplt_task: Box::new(|remote_id| async move { Ok(SignallingState::LocalSigCplt(remote_id)) }.boxed_local()),
-            receive_offer_task: Box::new(|_remote_id, _offer_set| std::future::pending().boxed_local()),
+            receive_offer_task: Box::new(|(_remote_id, _offer_set)| std::future::pending().boxed_local()),
             remote_sig_cplt_task: Box::new(|remote_id| async move { Ok(SignallingState::RemoteSigCplt(remote_id)) }.boxed_local()),
         }
     }
@@ -225,7 +227,7 @@ where
         ClientError: From<E>
     {
         // wrap callback
-        self.receive_answer_task = Box::new(move |remote_id, answer_set| {
+        self.receive_answer_task = Box::new(move |(remote_id, answer_set)| {
             let fut = f(remote_id, answer_set);
             async {
                 let remote_id = fut.await?;
@@ -265,7 +267,7 @@ where
         Fut: Future<Output = Result<(u64, (A, C)), E>> + 'static,
         ClientError: From<E>
     {
-        self.receive_offer_task = Box::new(move |remote_id, offer_set| {
+        self.receive_offer_task = Box::new(move |(remote_id, offer_set)| {
             let fut = f(remote_id, offer_set);
             async {
                 let (remote_id, answer_set) = fut.await?;
@@ -363,7 +365,7 @@ where
                 // queue receive answer
                 self.unordered_futs.extend([
                     answer_listener_task(listener).boxed_local(),
-                    (self.receive_answer_task)(remote_id, answer_set),
+                    (self.receive_answer_task)((remote_id, answer_set)),
                 ]);
             },
             // We wait to receive answer responses from the remote peers,
@@ -389,7 +391,7 @@ where
                 // queue receive offer
                 self.unordered_futs.extend([
                     offer_listener_task(listener).boxed_local(),
-                    (self.receive_offer_task)(remote_id, offer_set),
+                    (self.receive_offer_task)((remote_id, offer_set)),
                 ]);
             },
             // This offer is used to create a remote peer connection and generate an answer...
@@ -633,10 +635,10 @@ impl RtcSignallingClientBuilder {
     ///
     /// Returns resulting signalling client
     pub fn build(&self, addr: String) -> ClientResult<RtcSignallingClient> {
-        let timeout = self.timeout.clone();
+        let timeout = self.timeout;
         // create an empty temp request to build timeout metadata
         let mut tmp_req = Request::new(());
-        tmp_req.set_timeout(timeout.clone());
+        tmp_req.set_timeout(timeout);
         // decompose into parts to get complete grpc metadata
         let (grpc_metadata, _, _) = tmp_req.into_parts();
         // create the client
@@ -667,7 +669,7 @@ impl RtcSignallingClientBuilder {
             if self.domain.is_some() || self.tls_ca_pem.is_some() {
                 warn!("Signalling client domain/tls settings are ignored! Client TLS is handled by the browser.");
             }
-            let addr = if tls_enabled {
+            let addr = if self.tls_enabled {
                 format!("https://{addr}")
             } else {
                 format!("http://{addr}")
