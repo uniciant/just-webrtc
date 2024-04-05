@@ -56,7 +56,7 @@ async fn peer_echo_task(remote_id: u64, mut peer_connection: PeerConnection) -> 
 
 async fn create_offer() -> Result<((SessionDescription, Vec<ICECandidate>), PeerConnection)> {
     let channel_options = vec![(
-        format!("example_channel_"),
+        "example_channel_".to_string(),
         DataChannelOptions::default(),
     )];
     let mut local_peer_connection = PeerConnectionBuilder::new()
@@ -96,12 +96,8 @@ async fn receive_answer(
     local_peer_connection: &PeerConnection,
 ) -> Result<()> {
     // set answer description and add candidates
-    local_peer_connection
-        .set_remote_description(answer)
-        .await?;
-    local_peer_connection
-        .add_ice_candidates(candidates)
-        .await?;
+    local_peer_connection.set_remote_description(answer).await?;
+    local_peer_connection.add_ice_candidates(candidates).await?;
     Ok(())
 }
 
@@ -153,7 +149,7 @@ async fn run_peer(addr: &str) -> Result<()> {
             let (offer_set, local_peer_connection) = create_offer().await?;
             peer_connections
                 .borrow_mut()
-                .insert(remote_id.clone(), local_peer_connection)?;
+                .insert(remote_id, local_peer_connection)?;
             Ok::<_, anyhow::Error>((remote_id, offer_set))
         }
     };
@@ -187,7 +183,7 @@ async fn run_peer(addr: &str) -> Result<()> {
             let (answer_set, remote_peer_connection) = receive_offer(offer, candidates).await?;
             peer_connections
                 .borrow_mut()
-                .insert(remote_id.clone(), remote_peer_connection)?;
+                .insert(remote_id, remote_peer_connection)?;
             Ok::<_, anyhow::Error>((remote_id, answer_set))
         }
     };
@@ -202,8 +198,7 @@ async fn run_peer(addr: &str) -> Result<()> {
     };
 
     // build signalling client
-    let signalling_client = RtcSignallingClientBuilder::default()
-        .build(addr.to_string())?;
+    let signalling_client = RtcSignallingClientBuilder::default().build(addr.to_string())?;
     let mut signalling_peer = signalling_client.start_peer().await?;
     // set callbacks
     signalling_peer
