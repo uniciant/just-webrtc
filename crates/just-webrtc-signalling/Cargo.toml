@@ -40,6 +40,8 @@ tonic-build = { version = "0.11.0", default-features = false, features = ["prost
 
 [dev-dependencies]
 anyhow = "1.0"
+pretty_env_logger = "0.5"
+tokio = { version = "1.36", features = ["rt", "macros"] }
 
 [features]
 default = ["server", "server-web", "client"]
