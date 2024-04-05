@@ -182,7 +182,6 @@ impl RtcSignalling for RtcSignallingService {
         &self,
         request: Request<SignalOfferReq>,
     ) -> Result<Response<SignalOfferRsp>> {
-        debug!("check");
         let message = request.into_inner();
         let answerer_peer = message
             .answerer_peer
