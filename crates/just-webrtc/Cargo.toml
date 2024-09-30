@@ -1,6 +1,6 @@
 [package]
 name = "just-webrtc"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 authors = ["Reece Kibble <reecek@uniciant.com>"]
 categories = ["network-programming", "web-programming", "wasm", "game-development"]
@@ -16,16 +16,17 @@ exclude = [".git*"]
 [dependencies]
 bytes = "1.5"
 serde = "1.0"
-log = "0.4.20"
+log = "0.4"
 thiserror = "1.0"
-async_cell = "0.2.2"
+async_cell = "0.2"
+flume = { version = "0.11", default-features = false, features = ["async"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-js-sys = "0.3.68"
-wasm-bindgen = "0.2.91"
-serde-wasm-bindgen = "0.6.3"
-wasm-bindgen-futures = "0.4.42"
-web-sys = { version = "0.3.68", default-features = false, features = [
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", default-features = false, features = [
   "MessageEvent",
   "RtcBundlePolicy",
   "RtcConfiguration",
@@ -45,16 +46,14 @@ web-sys = { version = "0.3.68", default-features = false, features = [
   "RtcSessionDescription",
   "RtcSessionDescriptionInit",
 ] }
-local-channel = "0.1.5"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-webrtc = "0.10"
-trait-variant = "0.1.2"
-flume = { version = "0.11.0", default-features = false, features = ["async"] }
+webrtc = "0.11"
+trait-variant = "0.1"
 
 [dev-dependencies]
 anyhow = "1.0"
 pretty_env_logger = "0.5"
 tokio = { version = "1.36", features = ["rt", "macros"] }
-wasm-bindgen-test = "0.3.42"
+wasm-bindgen-test = "0.3"
 console_log = "1.0"
