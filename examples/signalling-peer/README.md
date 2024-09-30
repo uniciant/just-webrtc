@@ -23,6 +23,8 @@ Serve the binary via trunk and open the provided URL in your browser!
 
 To see the messages bouncing between peers, open the browser's developer console.
 
+NOTE: Depending on the browser and operating system, it is sometimes difficult to test local communications between two tabs. The most reliable combination for local testing I have found is between two firefox tabs, where one is in private browsing mode.
+
 ```sh
 # install protobuf compiler
 apt install -y protobuf-compiler
