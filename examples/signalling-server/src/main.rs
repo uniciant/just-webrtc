@@ -1,9 +1,6 @@
-use std::{sync::Arc, time::Duration};
-
 use anyhow::Result;
-use just_webrtc_signalling::{
-    server::Signalling, DEFAULT_NATIVE_SERVER_ADDR, DEFAULT_WEB_SERVER_ADDR,
-};
+use just_webrtc_signalling::{server::Signalling, DEFAULT_NATIVE_SERVER_ADDR, DEFAULT_WEB_SERVER_ADDR};
+use std::{sync::Arc, time::Duration};
 
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
 
