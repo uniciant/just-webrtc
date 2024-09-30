@@ -15,7 +15,7 @@ This signalling implementation is built around a [`tonic`](https://github.com/hy
 
 ```toml
 [dependencies]
-just-webrtc-signalling = "0.1"
+just-webrtc-signalling = "0.2"
 ```
 
 ## Documentation

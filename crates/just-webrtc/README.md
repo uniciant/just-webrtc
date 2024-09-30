@@ -17,7 +17,7 @@ Roll your own signalling setup, or use the ready-made standard signalling client
 
 ```toml
 [dependencies]
-just-webrtc = "0.1"
+just-webrtc = "0.2"
 ```
 
 ## Documentation
@@ -39,12 +39,12 @@ use just_webrtc::{
     DataChannelExt,
     PeerConnectionExt,
     SimpleLocalPeerConnection,
-    types::{SessionDescription, ICECandidate}
+    types::{SessionDescription, ICECandidate, PeerConnectionState}
 };
 
 async fn run_local_peer() -> Result<()> {
     // create simple local peer connection with unordered data channel
-    let mut local_peer_connection = SimpleLocalPeerConnection::build(false).await?;
+    let local_peer_connection = SimpleLocalPeerConnection::build(false).await?;
 
     // output offer and candidates for remote peer
     let offer = local_peer_connection.get_local_description().await.unwrap();
@@ -61,10 +61,10 @@ async fn run_local_peer() -> Result<()> {
     local_peer_connection.add_ice_candidates(candidates).await?;
 
     // local signalling is complete! we can now wait for a complete connection
-    local_peer_connection.wait_peer_connected().await;
+    while local_peer_connection.state_change().await != PeerConnectionState::Connected {}
 
     // receive data channel from local peer
-    let mut local_channel = local_peer_connection.receive_channel().await.unwrap();
+    let local_channel = local_peer_connection.receive_channel().await.unwrap();
     // wait for data channels to be ready
     local_channel.wait_ready().await;
 
@@ -87,14 +87,14 @@ use just_webrtc::{
     DataChannelExt,
     PeerConnectionExt,
     SimpleRemotePeerConnection,
-    types::{SessionDescription, ICECandidate}
+    types::{SessionDescription, ICECandidate, PeerConnectionState}
 };
 
 async fn run_remote_peer(offer: SessionDescription, candidates: Vec<ICECandidate>) -> Result<()> {
     // ... receive the offer and the candidates from Peer A via external signalling implementation ...
 
     // create simple remote peer connection from received offer and candidates
-    let mut remote_peer_connection = SimpleRemotePeerConnection::build(offer).await?;
+    let remote_peer_connection = SimpleRemotePeerConnection::build(offer).await?;
     remote_peer_connection.add_ice_candidates(candidates).await?;
     // output answer and candidates for local peer
     let answer = remote_peer_connection.get_local_description().await.unwrap();
@@ -104,10 +104,10 @@ async fn run_remote_peer(offer: SessionDescription, candidates: Vec<ICECandidate
     let _signalling = (answer, candidates);
 
     // remote signalling is complete! we can now wait for a complete connection
-    remote_peer_connection.wait_peer_connected().await;
+    while remote_peer_connection.state_change().await != PeerConnectionState::Connected {}
 
     // receive data channel from local and remote peers
-    let mut remote_channel = remote_peer_connection.receive_channel().await.unwrap();
+    let remote_channel = remote_peer_connection.receive_channel().await.unwrap();
     // wait for data channels to be ready
     remote_channel.wait_ready().await;
 
