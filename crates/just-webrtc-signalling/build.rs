@@ -9,6 +9,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("proto file should reside in a directory");
     tonic_build::configure()
         .build_transport(target != "wasm32-unknown-unknown")
-        .compile(&[proto_path], &[proto_dir])?;
+        .compile_protos(&[proto_path], &[proto_dir])?;
     Ok(())
 }

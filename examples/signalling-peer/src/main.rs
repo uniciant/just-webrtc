@@ -1,31 +1,29 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
-
 use anyhow::{anyhow, Result};
-use futures_util::StreamExt;
-use log::info;
-
-use just_webrtc::{
-    platform::PeerConnection,
-    types::{DataChannelOptions, ICECandidate, SessionDescription},
-    DataChannelExt, PeerConnectionBuilder, PeerConnectionExt,
+use futures_util::future::{Fuse, FusedFuture};
+use futures_util::{pin_mut, select, FutureExt, StreamExt};
+use just_webrtc::platform::{Channel, PeerConnection};
+use just_webrtc::types::{
+    DataChannelOptions, ICECandidate, PeerConnectionState, SessionDescription,
 };
+use just_webrtc::{DataChannelExt, PeerConnectionBuilder, PeerConnectionExt};
 use just_webrtc_signalling::client::RtcSignallingClientBuilder;
+use log::{error, info, warn};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::time::Duration;
 
 const ECHO_REQUEST: &str = "I'm literally Ryan Gosling.";
 const ECHO_RESPONSE: &str = "I know right! He's literally me.";
+const ECHO_PERIOD: Duration = Duration::from_millis(1000);
+const CONNECTION_DROP_TIMEOUT: Duration = Duration::from_secs(15);
 
-async fn peer_echo_task(remote_id: u64, mut peer_connection: PeerConnection) -> Result<u64> {
-    info!("started peer echo task. ({remote_id})");
-    // take peer connection from the map
-    peer_connection.wait_peer_connected().await;
-    let mut channel = peer_connection.receive_channel().await.unwrap();
-    channel.wait_ready().await;
-    // prepare echo request/response
+async fn channel_echo_task(offerer: bool, channel: Channel) -> Result<()> {
     let channel_fmt = format!("{}:{}", channel.label(), channel.id());
     // if offerer, we send echo requests, otherwise we listen for requests
-    if peer_connection.is_offerer() {
+    if offerer {
         let echo_request = bincode::serialize(ECHO_REQUEST)?.into();
-        let mut interval = zduny_wasm_timer::Interval::new(Duration::from_secs(1));
+        let mut interval = zduny_wasm_timer::Interval::new(ECHO_PERIOD);
         loop {
             interval.next().await;
             // offerer makes echo requests
@@ -54,12 +52,77 @@ async fn peer_echo_task(remote_id: u64, mut peer_connection: PeerConnection) -> 
     }
 }
 
+async fn peer_echo_task(remote_id: &u64, peer_connection: PeerConnection) -> Result<()> {
+    info!("started peer echo task. ({remote_id})");
+    let state_change_fut = peer_connection.state_change().fuse();
+    let channel_ready_fut = Fuse::terminated();
+    let channel_task_fut = Fuse::terminated();
+    let connection_drop_timeout_fut = Fuse::terminated();
+    pin_mut!(
+        state_change_fut,
+        channel_task_fut,
+        channel_ready_fut,
+        connection_drop_timeout_fut
+    );
+    // peer connection monitoring loop
+    // in this example we use the futures crate select! macro as a runtime agnostic method
+    // for concurrently monitoring peer connection state and running a single channel task.
+    loop {
+        select! {
+            state = state_change_fut => {
+                state_change_fut.set(peer_connection.state_change().fuse());
+                match state {
+                    PeerConnectionState::New |
+                    PeerConnectionState::Connected => {
+                        // clear the timeout fut
+                        if !connection_drop_timeout_fut.is_terminated() {
+                            info!("peer connection recovered! ({remote_id})");
+                            connection_drop_timeout_fut.set(Fuse::terminated());
+                        } else {
+                            info!("peer connected. ({remote_id})");
+                            let channel = peer_connection.receive_channel().await.unwrap();
+                            let offerer = peer_connection.is_offerer();
+                            channel_ready_fut.set(async move {
+                                channel.wait_ready().await;
+                                (channel, offerer)
+                            }.fuse());
+                        }
+                    },
+                    PeerConnectionState::Disconnected => {
+                        warn!("peer connection interrupted. attempting to recover... ({remote_id})");
+                        let timeout = zduny_wasm_timer::Delay::new(CONNECTION_DROP_TIMEOUT);
+                        connection_drop_timeout_fut.set(timeout.fuse());
+                    },
+                    PeerConnectionState::Failed => {
+                        error!("peer connection failed! ({remote_id})");
+                        return Ok(())
+                    }
+                    PeerConnectionState::Closed => {
+                        info!("peer connection closed! ({remote_id})");
+                        return Ok(())
+                    }
+                    _ => {},
+                }
+            },
+            (channel, offerer) = channel_ready_fut => {
+                channel_task_fut.set(channel_echo_task(offerer, channel).fuse());
+            }
+            result = channel_task_fut => result?,
+            result = connection_drop_timeout_fut => {
+                result?;
+                error!("timeout waiting for connection to re-establish. ({remote_id})");
+                return Ok(())
+            },
+        }
+    }
+}
+
 async fn create_offer() -> Result<((SessionDescription, Vec<ICECandidate>), PeerConnection)> {
     let channel_options = vec![(
         "example_channel_".to_string(),
         DataChannelOptions::default(),
     )];
-    let mut local_peer_connection = PeerConnectionBuilder::new()
+    let local_peer_connection = PeerConnectionBuilder::new()
         .with_channel_options(channel_options)?
         .build()
         .await?;
@@ -75,7 +138,7 @@ async fn receive_offer(
     offer: SessionDescription,
     candidates: Vec<ICECandidate>,
 ) -> Result<((SessionDescription, Vec<ICECandidate>), PeerConnection)> {
-    let mut remote_peer_connection = PeerConnectionBuilder::new()
+    let remote_peer_connection = PeerConnectionBuilder::new()
         .with_remote_offer(Some(offer))?
         .build()
         .await?;
@@ -147,6 +210,7 @@ async fn run_peer(addr: &str) -> Result<()> {
         let peer_connections = peer_connections_offer.clone();
         async move {
             let (offer_set, local_peer_connection) = create_offer().await?;
+            // add local peer connection to the map
             peer_connections
                 .borrow_mut()
                 .insert(remote_id, local_peer_connection)?;
@@ -158,6 +222,7 @@ async fn run_peer(addr: &str) -> Result<()> {
     let receive_answer_fn = move |remote_id, (answer, candidates)| {
         let peer_connections = peer_connections_answer.clone();
         async move {
+            // take peer connection from the map
             let peer_connection = peer_connections.borrow_mut().take(&remote_id)?;
             receive_answer(answer, candidates, &peer_connection).await?;
             peer_connections
@@ -171,8 +236,10 @@ async fn run_peer(addr: &str) -> Result<()> {
     let local_sig_cplt_fn = move |remote_id| {
         let peer_connections = peer_connections_local.clone();
         async move {
+            // take peer connection from the map
             let local_peer_connection = peer_connections.borrow_mut().take(&remote_id)?;
-            peer_echo_task(remote_id, local_peer_connection).await
+            peer_echo_task(&remote_id, local_peer_connection).await?;
+            Ok::<_, anyhow::Error>(remote_id)
         }
     };
     // prepare receive offer callback closure
@@ -181,6 +248,7 @@ async fn run_peer(addr: &str) -> Result<()> {
         let peer_connections = peer_connections_offer.clone();
         async move {
             let (answer_set, remote_peer_connection) = receive_offer(offer, candidates).await?;
+            // add remote peer connection to the map
             peer_connections
                 .borrow_mut()
                 .insert(remote_id, remote_peer_connection)?;
@@ -193,7 +261,8 @@ async fn run_peer(addr: &str) -> Result<()> {
         let peer_connections = peer_connections_remote.clone();
         async move {
             let remote_peer_connection = peer_connections.borrow_mut().take(&remote_id)?;
-            peer_echo_task(remote_id, remote_peer_connection).await
+            peer_echo_task(&remote_id, remote_peer_connection).await?;
+            Ok::<_, anyhow::Error>(remote_id)
         }
     };
 

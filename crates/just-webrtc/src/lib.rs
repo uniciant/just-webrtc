@@ -4,15 +4,16 @@
 #![warn(dead_code)]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
-use std::marker::PhantomData;
-
-use bytes::Bytes;
-
 pub mod platform;
 pub mod types;
 
+use bytes::Bytes;
 use platform::{Channel, Error, PeerConnection, Platform};
-use types::{DataChannelOptions, ICECandidate, ICEServer, PeerConfiguration, SessionDescription};
+use std::marker::PhantomData;
+use types::{
+    DataChannelOptions, ICECandidate, ICEServer, PeerConfiguration, PeerConnectionState,
+    SessionDescription,
+};
 
 #[cfg_attr(not(target_arch = "wasm32"), trait_variant::make(Send))]
 #[cfg_attr(target_arch = "wasm32", allow(async_fn_in_trait))]
@@ -21,7 +22,7 @@ pub trait DataChannelExt {
     /// Wait for the data channel to become open and ready to transfer data
     async fn wait_ready(&self);
     /// Receive data from the channel
-    async fn receive(&mut self) -> Result<Bytes, Error>;
+    async fn receive(&self) -> Result<Bytes, Error>;
     /// Send data to the channel
     async fn send(&self, data: &Bytes) -> Result<usize, Error>;
     /// Get the unique ID of the channel
@@ -34,12 +35,12 @@ pub trait DataChannelExt {
 #[cfg_attr(target_arch = "wasm32", allow(async_fn_in_trait))]
 /// **Platform agnostic WebRTC PeerConnection API**
 pub trait PeerConnectionExt {
-    /// Wait for the peer connection to become connected
-    async fn wait_peer_connected(&self);
+    /// Await change in the peer connection state
+    async fn state_change(&self) -> PeerConnectionState;
     /// Receive a data channel from the peer connection
-    async fn receive_channel(&mut self) -> Result<Channel, Error>;
+    async fn receive_channel(&self) -> Result<Channel, Error>;
     /// Collect all ICE candidates from the peer connection
-    async fn collect_ice_candidates(&mut self) -> Result<Vec<ICECandidate>, Error>;
+    async fn collect_ice_candidates(&self) -> Result<Vec<ICECandidate>, Error>;
     /// Get the local `SessionDescription` of the peer connection
     async fn get_local_description(&self) -> Option<SessionDescription>;
     /// Add remote ICE candidates to the peer connection

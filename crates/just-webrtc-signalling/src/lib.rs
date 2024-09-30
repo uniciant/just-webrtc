@@ -7,6 +7,8 @@
 #[cfg(all(target_arch = "wasm32", feature = "server"))]
 compile_error!("feature \"server\" is not compatible with target \"wasm32\"");
 
+extern crate alloc;
+
 use prost as _;
 
 #[cfg(any(feature = "client", feature = "server"))]

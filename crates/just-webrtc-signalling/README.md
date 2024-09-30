@@ -15,7 +15,7 @@ This signalling implementation is built around a [`tonic`](https://github.com/hy
 
 ```toml
 [dependencies]
-just-webrtc-signalling = "0.1"
+just-webrtc-signalling = "0.2"
 ```
 
 ## Documentation
@@ -152,4 +152,5 @@ async fn serve() -> Result<()> {
 This project is licensed under either of
 * [Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0)
 * [MIT License](https://opensource.org/licenses/MIT)
+
 at your option.

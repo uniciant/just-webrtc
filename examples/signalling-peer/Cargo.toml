@@ -10,13 +10,13 @@ anyhow = "1.0"
 just-webrtc = { path = "../../crates/just-webrtc" }
 just-webrtc-signalling = { path = "../../crates/just-webrtc-signalling", default-features = false, features = ["client"] }
 log = "0.4"
-futures-util = "0.3.30"
-zduny-wasm-timer = "0.2.8"
+futures-util = "0.3"
+zduny-wasm-timer = "0.2"
 bincode = "1.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_log = "1.0"
-wasm-bindgen-futures = "0.4.42"
+wasm-bindgen-futures = "0.4"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pretty_env_logger = "0.5"
