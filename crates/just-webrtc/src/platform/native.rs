@@ -1,43 +1,39 @@
 //! Native WebRTC implementation using `webrtc-rs`
 
-use std::{fmt::Debug, sync::Arc};
-
+use crate::{Platform, DataChannelExt, DataChannelOptions, PeerConnectionBuilder, PeerConnectionExt};
+use crate::types::{
+    BundlePolicy, ICECandidate, ICECredentialType, ICEServer, ICETransportPolicy,
+    PeerConfiguration, PeerConnectionState, RTCPMuxPolicy, SDPType, SessionDescription,
+};
 use async_cell::sync::AsyncCell;
 use bytes::Bytes;
 use flume::{Receiver, RecvError, Sender};
 use log::{debug, error, trace};
-use webrtc::{
-    api::APIBuilder,
-    data_channel::{
-        data_channel_init::RTCDataChannelInit, data_channel_message::DataChannelMessage,
-        RTCDataChannel,
-    },
-    ice_transport::{
-        ice_candidate::{RTCIceCandidate, RTCIceCandidateInit},
-        ice_connection_state::RTCIceConnectionState,
-        ice_credential_type::RTCIceCredentialType,
-        ice_gatherer_state::RTCIceGathererState,
-        ice_server::RTCIceServer,
-    },
-    peer_connection::{
-        configuration::RTCConfiguration,
-        peer_connection_state::RTCPeerConnectionState,
-        policy::{
-            bundle_policy::RTCBundlePolicy, ice_transport_policy::RTCIceTransportPolicy,
-            rtcp_mux_policy::RTCRtcpMuxPolicy,
-        },
-        sdp::{sdp_type::RTCSdpType, session_description::RTCSessionDescription},
-        RTCPeerConnection,
-    },
+use std::fmt::Debug;
+use std::sync::Arc;
+use webrtc::api::APIBuilder;
+use webrtc::data_channel::{
+    data_channel_init::RTCDataChannelInit, data_channel_message::DataChannelMessage,
+    RTCDataChannel,
 };
-
-use super::Platform;
-use crate::{
-    types::{
-        BundlePolicy, ICECandidate, ICECredentialType, ICEServer, ICETransportPolicy,
-        PeerConfiguration, PeerConnectionState, RTCPMuxPolicy, SDPType, SessionDescription,
-    },
-    DataChannelExt, DataChannelOptions, PeerConnectionBuilder, PeerConnectionExt,
+use webrtc::ice_transport::{
+    ice_candidate::{RTCIceCandidate, RTCIceCandidateInit},
+    ice_connection_state::RTCIceConnectionState,
+    ice_credential_type::RTCIceCredentialType,
+    ice_gatherer_state::RTCIceGathererState,
+    ice_server::RTCIceServer,
+};
+use webrtc::peer_connection::{
+    configuration::RTCConfiguration,
+    peer_connection_state::RTCPeerConnectionState,
+    RTCPeerConnection,
+};
+use webrtc::peer_connection::policy::{
+    bundle_policy::RTCBundlePolicy, ice_transport_policy::RTCIceTransportPolicy,
+    rtcp_mux_policy::RTCRtcpMuxPolicy,
+};
+use webrtc::peer_connection::sdp::{
+    sdp_type::RTCSdpType, session_description::RTCSessionDescription
 };
 
 /// Native platform marker
@@ -77,7 +73,7 @@ impl DataChannelExt for Channel {
         while !(self.ready_state.take().await) {}
     }
 
-    async fn receive(&mut self) -> Result<Bytes, Error> {
+    async fn receive(&self) -> Result<Bytes, Error> {
         let b = self.rx.recv_async().await?;
         Ok(b)
     }
@@ -107,16 +103,16 @@ pub struct PeerConnection {
 }
 
 impl PeerConnectionExt for PeerConnection {
-    async fn wait_peer_connected(&self) {
-        while self.peer_connection_state.take().await != PeerConnectionState::Connected {}
+    async fn state_change(&self) -> PeerConnectionState {
+        self.peer_connection_state.take().await
     }
 
-    async fn receive_channel(&mut self) -> Result<Channel, Error> {
-        let b = self.channels_rx.recv_async().await?;
-        Ok(b)
+    async fn receive_channel(&self) -> Result<Channel, Error> {
+        let c = self.channels_rx.recv_async().await?;
+        Ok(c)
     }
 
-    async fn collect_ice_candidates(&mut self) -> Result<Vec<ICECandidate>, Error> {
+    async fn collect_ice_candidates(&self) -> Result<Vec<ICECandidate>, Error> {
         let mut candidate_inits = vec![];
         while let Some(candidate_init) = self.candidate_rx.recv_async().await? {
             candidate_inits.push(candidate_init);

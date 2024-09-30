@@ -1,29 +1,23 @@
 //! Wasm WebRTC implementation using `web_sys`
 
-use std::rc::Rc;
-
+use crate::{Platform, DataChannelExt, PeerConnectionBuilder, PeerConnectionExt};
+use crate::types::{
+        BundlePolicy, ICECandidate, ICETransportPolicy, PeerConnectionState, SDPType,
+        SessionDescription,
+};
 use async_cell::unsync::AsyncCell;
 use bytes::Bytes;
 use js_sys::{Function, Reflect};
-use local_channel::mpsc::{Receiver, Sender};
+use flume::{Receiver, RecvError, Sender};
 use log::{debug, error, trace};
+use std::rc::Rc;
 use wasm_bindgen::{closure::Closure, convert::FromWasmAbi, JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
-
 use web_sys::{
     Event, MessageEvent, RtcBundlePolicy, RtcConfiguration, RtcDataChannel, RtcDataChannelEvent,
     RtcDataChannelInit, RtcDataChannelType, RtcIceCandidateInit, RtcIceConnectionState,
     RtcIceTransportPolicy, RtcPeerConnection, RtcPeerConnectionIceEvent, RtcPeerConnectionState,
     RtcSdpType, RtcSessionDescriptionInit,
-};
-
-use super::Platform;
-use crate::{
-    types::{
-        BundlePolicy, ICECandidate, ICETransportPolicy, PeerConnectionState, SDPType,
-        SessionDescription,
-    },
-    DataChannelExt, PeerConnectionBuilder, PeerConnectionExt,
 };
 
 /// WASM platform marker
@@ -34,9 +28,9 @@ impl Platform for Wasm {}
 #[derive(thiserror::Error, Debug)]
 /// WASM JustWebRTC Error type
 pub enum Error {
-    /// Local unbounded mpsc channel receive error
-    #[error("data channel senders dropped!")]
-    MpscRecvError,
+    /// Error from flume unbounded mpsc channel
+    #[error(transparent)]
+    MpscRecvError(#[from] RecvError),
     /// Error originating from web_sys
     #[error("webrtc error: {0}")]
     WebRtcError(String),
@@ -69,8 +63,9 @@ impl DataChannelExt for Channel {
         while !(self.ready_state.take().await) {}
     }
 
-    async fn receive(&mut self) -> Result<Bytes, Error> {
-        self.rx.recv().await.ok_or(Error::MpscRecvError)
+    async fn receive(&self) -> Result<Bytes, Error> {
+        let b = self.rx.recv_async().await?;
+        Ok(b)
     }
 
     async fn send(&self, data: &Bytes) -> Result<usize, Error> {
@@ -100,19 +95,18 @@ pub struct PeerConnection {
 }
 
 impl PeerConnectionExt for PeerConnection {
-    async fn wait_peer_connected(&self) {
-        while self.peer_connection_state.take().await != PeerConnectionState::Connected {}
+    async fn state_change(&self) -> PeerConnectionState {
+        self.peer_connection_state.take().await
     }
 
-    async fn receive_channel(&mut self) -> Result<Channel, Error> {
-        self.channels_rx.recv().await.ok_or(Error::MpscRecvError)
+    async fn receive_channel(&self) -> Result<Channel, Error> {
+        let c = self.channels_rx.recv_async().await?;
+        Ok(c)
     }
 
-    async fn collect_ice_candidates(&mut self) -> Result<Vec<ICECandidate>, Error> {
+    async fn collect_ice_candidates(&self) -> Result<Vec<ICECandidate>, Error> {
         let mut candidate_inits = vec![];
-        while let Some(candidate_init) =
-            self.candidate_rx.recv().await.ok_or(Error::MpscRecvError)?
-        {
+        while let Some(candidate_init) = self.candidate_rx.recv_async().await? {
             candidate_inits.push(candidate_init);
         }
         Ok(candidate_inits)
@@ -133,9 +127,9 @@ impl PeerConnectionExt for PeerConnection {
     async fn add_ice_candidates(&self, remote_candidates: Vec<ICECandidate>) -> Result<(), Error> {
         // add remote ICE candidates
         for candidate in remote_candidates {
-            let mut candidate_init = RtcIceCandidateInit::new(&candidate.candidate);
-            candidate_init.sdp_m_line_index(candidate.sdp_mline_index);
-            candidate_init.sdp_mid(candidate.sdp_mid.as_deref());
+            let candidate_init = RtcIceCandidateInit::new(&candidate.candidate);
+            candidate_init.set_sdp_m_line_index(candidate.sdp_mline_index);
+            candidate_init.set_sdp_mid(candidate.sdp_mid.as_deref());
             let js_promise = self
                 .inner
                 .add_ice_candidate_with_opt_rtc_ice_candidate_init(Some(&candidate_init));
@@ -148,8 +142,8 @@ impl PeerConnectionExt for PeerConnection {
 
     async fn set_remote_description(&self, remote_answer: SessionDescription) -> Result<(), Error> {
         // add remote description (answer)
-        let mut desc_dict = RtcSessionDescriptionInit::new(remote_answer.sdp_type.into());
-        desc_dict.sdp(&remote_answer.sdp);
+        let desc_dict = RtcSessionDescriptionInit::new(remote_answer.sdp_type.into());
+        desc_dict.set_sdp(&remote_answer.sdp);
         let js_promise = self.inner.set_remote_description(&desc_dict);
         JsFuture::from(js_promise)
             .await
@@ -169,7 +163,7 @@ fn handle_data_channel(channel: RtcDataChannel, channels_tx: &Sender<Channel>) {
     // override default 'blob' binary type format that is unsupported on most browsers
     channel.set_binary_type(RtcDataChannelType::Arraybuffer);
 
-    let (incoming_tx, rx) = local_channel::mpsc::channel();
+    let (incoming_tx, rx) = flume::unbounded();
     let ready_state = Rc::new(AsyncCell::new());
 
     debug!("New data channel ({label}:{id})");
@@ -292,19 +286,19 @@ impl PeerConnectionBuilder<Wasm> {
     /// Build new WASM JustWebRTC Peer Connection
     pub async fn build(&self) -> Result<PeerConnection, Error> {
         // parse config to dictionary
-        let mut config = RtcConfiguration::new();
-        config.bundle_policy(self.config.bundle_policy.into());
-        config.ice_servers(&serde_wasm_bindgen::to_value(&self.config.ice_servers)?);
-        config.ice_transport_policy(self.config.ice_transport_policy.into());
-        config.peer_identity(Some(&self.config.peer_identity));
+        let config = RtcConfiguration::new();
+        config.set_bundle_policy(self.config.bundle_policy.into());
+        config.set_ice_servers(&serde_wasm_bindgen::to_value(&self.config.ice_servers)?);
+        config.set_ice_transport_policy(self.config.ice_transport_policy.into());
+        config.set_peer_identity(Some(&self.config.peer_identity));
 
         // create new connection from config
         let connection =
             Rc::new(RtcPeerConnection::new_with_configuration(&config).map_err(js_value_to_error)?);
 
         // create mpsc channels for passing info to/from handlers
-        let (candidate_tx, candidate_rx) = local_channel::mpsc::channel::<Option<ICECandidate>>();
-        let (channels_tx, channels_rx) = local_channel::mpsc::channel::<Channel>();
+        let (candidate_tx, candidate_rx) = flume::unbounded::<Option<ICECandidate>>();
+        let (channels_tx, channels_rx) = flume::unbounded::<Channel>();
         let peer_connection_state = Rc::new(AsyncCell::new());
 
         // register peer state change handler
@@ -346,8 +340,8 @@ impl PeerConnectionBuilder<Wasm> {
                 },
             );
             // set the remote SessionDescription (provided by remote peer via external signalling)
-            let mut remote_desc_dict = RtcSessionDescriptionInit::new(offer.sdp_type.into());
-            remote_desc_dict.sdp(&offer.sdp);
+            let remote_desc_dict = RtcSessionDescriptionInit::new(offer.sdp_type.into());
+            remote_desc_dict.set_sdp(&offer.sdp);
             let js_promise = connection.set_remote_description(&remote_desc_dict);
             JsFuture::from(js_promise)
                 .await
@@ -360,31 +354,31 @@ impl PeerConnectionBuilder<Wasm> {
             let js_value =
                 Reflect::get(&js_value, &JsValue::from_str("sdp")).map_err(js_value_to_error)?;
             let answer_sdp = js_value.as_string().unwrap();
-            let mut answer = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
-            answer.sdp(&answer_sdp);
+            let answer = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
+            answer.set_sdp(&answer_sdp);
             (answer, false)
         } else {
             // create channels from options (we are offering)
             for (index, (label_prefix, channel_options)) in self.channel_options.iter().enumerate()
             {
-                let mut data_channel_dict = RtcDataChannelInit::new();
+                let data_channel_dict = RtcDataChannelInit::new();
                 if let Some(o) = channel_options.ordered {
-                    data_channel_dict.ordered(o);
+                    data_channel_dict.set_ordered(o);
                 }
                 if let Some(m) = channel_options.max_packet_life_time {
-                    data_channel_dict.max_packet_life_time(m);
+                    data_channel_dict.set_max_packet_life_time(m);
                 }
                 if let Some(r) = channel_options.max_retransmits {
-                    data_channel_dict.max_retransmits(r);
+                    data_channel_dict.set_max_retransmits(r);
                 }
                 if let Some(p) = &channel_options.protocol {
-                    data_channel_dict.protocol(p);
+                    data_channel_dict.set_protocol(p);
                 }
                 if let Some(id) = channel_options.negotiated {
-                    data_channel_dict.negotiated(true);
-                    data_channel_dict.id(id);
+                    data_channel_dict.set_negotiated(true);
+                    data_channel_dict.set_id(id);
                 } else {
-                    data_channel_dict.id(index as u16);
+                    data_channel_dict.set_id(index as u16);
                 }
                 let channel = connection.create_data_channel_with_data_channel_dict(
                     &format!("{label_prefix}{index}"),
@@ -400,8 +394,8 @@ impl PeerConnectionBuilder<Wasm> {
             let js_value =
                 Reflect::get(&js_value, &JsValue::from_str("sdp")).map_err(js_value_to_error)?;
             let offer_sdp = js_value.as_string().unwrap();
-            let mut offer = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
-            offer.sdp(&offer_sdp);
+            let offer = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
+            offer.set_sdp(&offer_sdp);
             (offer, true)
         };
 
