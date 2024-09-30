@@ -1,14 +1,14 @@
 //! Wasm WebRTC implementation using `web_sys`
 
-use crate::{Platform, DataChannelExt, PeerConnectionBuilder, PeerConnectionExt};
 use crate::types::{
-        BundlePolicy, ICECandidate, ICETransportPolicy, PeerConnectionState, SDPType,
-        SessionDescription,
+    BundlePolicy, ICECandidate, ICETransportPolicy, PeerConnectionState, SDPType,
+    SessionDescription,
 };
+use crate::{DataChannelExt, PeerConnectionBuilder, PeerConnectionExt, Platform};
 use async_cell::unsync::AsyncCell;
 use bytes::Bytes;
-use js_sys::{Function, Reflect};
 use flume::{Receiver, RecvError, Sender};
+use js_sys::{Function, Reflect};
 use log::{debug, error, trace};
 use std::rc::Rc;
 use wasm_bindgen::{closure::Closure, convert::FromWasmAbi, JsCast, JsValue};

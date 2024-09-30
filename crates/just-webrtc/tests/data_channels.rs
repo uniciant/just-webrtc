@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
-use just_webrtc::{DataChannelExt, PeerConnectionBuilder, PeerConnectionExt};
 use just_webrtc::types::{DataChannelOptions, PeerConnectionState};
+use just_webrtc::{DataChannelExt, PeerConnectionBuilder, PeerConnectionExt};
 use log::debug;
 
 async fn test_data_channel() -> Result<()> {

@@ -1,9 +1,11 @@
 //! Native WebRTC implementation using `webrtc-rs`
 
-use crate::{Platform, DataChannelExt, DataChannelOptions, PeerConnectionBuilder, PeerConnectionExt};
 use crate::types::{
     BundlePolicy, ICECandidate, ICECredentialType, ICEServer, ICETransportPolicy,
     PeerConfiguration, PeerConnectionState, RTCPMuxPolicy, SDPType, SessionDescription,
+};
+use crate::{
+    DataChannelExt, DataChannelOptions, PeerConnectionBuilder, PeerConnectionExt, Platform,
 };
 use async_cell::sync::AsyncCell;
 use bytes::Bytes;
@@ -13,8 +15,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::{
-    data_channel_init::RTCDataChannelInit, data_channel_message::DataChannelMessage,
-    RTCDataChannel,
+    data_channel_init::RTCDataChannelInit, data_channel_message::DataChannelMessage, RTCDataChannel,
 };
 use webrtc::ice_transport::{
     ice_candidate::{RTCIceCandidate, RTCIceCandidateInit},
@@ -23,17 +24,16 @@ use webrtc::ice_transport::{
     ice_gatherer_state::RTCIceGathererState,
     ice_server::RTCIceServer,
 };
-use webrtc::peer_connection::{
-    configuration::RTCConfiguration,
-    peer_connection_state::RTCPeerConnectionState,
-    RTCPeerConnection,
-};
 use webrtc::peer_connection::policy::{
     bundle_policy::RTCBundlePolicy, ice_transport_policy::RTCIceTransportPolicy,
     rtcp_mux_policy::RTCRtcpMuxPolicy,
 };
 use webrtc::peer_connection::sdp::{
-    sdp_type::RTCSdpType, session_description::RTCSessionDescription
+    sdp_type::RTCSdpType, session_description::RTCSessionDescription,
+};
+use webrtc::peer_connection::{
+    configuration::RTCConfiguration, peer_connection_state::RTCPeerConnectionState,
+    RTCPeerConnection,
 };
 
 /// Native platform marker

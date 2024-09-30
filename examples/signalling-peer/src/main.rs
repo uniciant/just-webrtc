@@ -1,8 +1,10 @@
 use anyhow::{anyhow, Result};
+use futures_util::future::{Fuse, FusedFuture};
 use futures_util::{pin_mut, select, FutureExt, StreamExt};
-use futures_util::future::{FusedFuture, Fuse};
 use just_webrtc::platform::{Channel, PeerConnection};
-use just_webrtc::types::{DataChannelOptions, ICECandidate, PeerConnectionState, SessionDescription};
+use just_webrtc::types::{
+    DataChannelOptions, ICECandidate, PeerConnectionState, SessionDescription,
+};
 use just_webrtc::{DataChannelExt, PeerConnectionBuilder, PeerConnectionExt};
 use just_webrtc_signalling::client::RtcSignallingClientBuilder;
 use log::{error, info, warn};
@@ -56,7 +58,12 @@ async fn peer_echo_task(remote_id: &u64, peer_connection: PeerConnection) -> Res
     let channel_ready_fut = Fuse::terminated();
     let channel_task_fut = Fuse::terminated();
     let connection_drop_timeout_fut = Fuse::terminated();
-    pin_mut!(state_change_fut, channel_task_fut, channel_ready_fut, connection_drop_timeout_fut);
+    pin_mut!(
+        state_change_fut,
+        channel_task_fut,
+        channel_ready_fut,
+        connection_drop_timeout_fut
+    );
     // peer connection monitoring loop
     // in this example we use the futures crate select! macro as a runtime agnostic method
     // for concurrently monitoring peer connection state and running a single channel task.

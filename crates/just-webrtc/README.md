@@ -125,4 +125,5 @@ async fn run_remote_peer(offer: SessionDescription, candidates: Vec<ICECandidate
 This project is licensed under either of
 * [Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0)
 * [MIT License](https://opensource.org/licenses/MIT)
+
 at your option.

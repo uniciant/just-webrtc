@@ -10,7 +10,10 @@ pub mod types;
 use bytes::Bytes;
 use platform::{Channel, Error, PeerConnection, Platform};
 use std::marker::PhantomData;
-use types::{DataChannelOptions, ICECandidate, ICEServer, PeerConfiguration, PeerConnectionState, SessionDescription};
+use types::{
+    DataChannelOptions, ICECandidate, ICEServer, PeerConfiguration, PeerConnectionState,
+    SessionDescription,
+};
 
 #[cfg_attr(not(target_arch = "wasm32"), trait_variant::make(Send))]
 #[cfg_attr(target_arch = "wasm32", allow(async_fn_in_trait))]
